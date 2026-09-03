@@ -36,6 +36,17 @@ class RungResult:
     raw: Any = None
 
     @property
+    def empty(self) -> bool:
+        """Ступень не нашла НИЧЕГО.
+
+        Такая ступень не имеет права менять диагноз: если первая сказала
+        SILENT_EMPTY или SCHEMA_DRIFT, а вторая просто ничего не извлекла,
+        итогом обязан остаться диагноз первой. Иначе блок и дрейф
+        превращаются в «частичный успех», и адрес штрафуется не за то.
+        """
+        return not (self.name or self.seller_name or self.legal_name)
+
+    @property
     def complete(self) -> bool:
         return bool(self.name) and self.seller_status in (
             SellerStatus.RESOLVED,
@@ -71,9 +82,15 @@ class Extractor(Protocol):
 
 
 def merge(a: RungResult | None, b: RungResult) -> RungResult:
-    """Слить результаты ступеней, не теряя уже добытого."""
+    """Слить результаты ступеней, не теряя уже добытого и не стирая диагноз."""
     if a is None:
         return b
+    if b.empty and not a.empty:
+        # Пустая ступень ничего не добавила — и вердикт менять не вправе.
+        return a
+    if b.empty and a.empty:
+        # Обе пусты: сохраняем ПЕРВЫЙ диагноз. Он ближе к причине.
+        return a
     return RungResult(
         verdict=b.verdict if b.verdict is not Verdict.OK else (a.verdict if a.name else b.verdict),
         name=a.name or b.name,
@@ -134,4 +151,5 @@ async def run_ladder(
         return RungResult(verdict=Verdict.BUDGET_EXHAUSTED), last
     if best.name:
         return replace(best, verdict=Verdict.PARTIAL), last
+    # Ничего не найдено: отдаём накопленный диагноз, а не «частичный успех».
     return best, last
