@@ -8,6 +8,9 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from mktlink.constants import (
+    CACHE_FRESH_TTL_PINNED_S,
+    CACHE_FRESH_TTL_S,
+    CACHE_STALE_HORIZON_S,
     RESPONSE_BUDGET_DEFAULT_MS,
     RESPONSE_BUDGET_MAX_MS,
     RESPONSE_BUDGET_MIN_MS,
@@ -80,6 +83,29 @@ class Settings(BaseSettings):
     #: запроса не бывает. Включается только явным решением заказчика и стоит
     #: +5 с к p95.
     ym_render_enabled: bool = False
+
+    # --- кэш результата --------------------------------------------------------
+    #: Срок свежести ответа на МОДЕЛЬНОМ URL, секунды.
+    #:
+    #: В конфиге, а не константой, по просьбе заказчика: срок будет расти. И
+    #: расти ему есть куда — устаревает здесь ровно одно: продавец оффера по
+    #: умолчанию. Ни названия, ни идентификаторов это не касается, а цены в
+    #: ответе нет вовсе.
+    #:
+    #: Верхняя граница согласована с ``STALE_HORIZON_S``: дольше запись всё
+    #: равно не живёт в Redis, и разрешать больше значило бы обещать свежесть
+    #: записи, которой уже нет.
+    product_ttl_s: int = Field(default=CACHE_FRESH_TTL_S, ge=0, le=CACHE_STALE_HORIZON_S)
+
+    #: Срок свежести, когда оффер ЗАКРЕПЛЁН в ссылке явным параметром.
+    #:
+    #: Отдельная ручка, потому что это другой случай, а не другое значение: на
+    #: закреплённом оффере продавец — свойство ССЫЛКИ, и держать такой ответ
+    #: дольше безопасно по построению. ``0`` означает «использовать то же, что
+    #: для модельного URL».
+    product_ttl_pinned_s: int = Field(
+        default=CACHE_FRESH_TTL_PINNED_S, ge=0, le=CACHE_STALE_HORIZON_S
+    )
 
     # --- Redis ----------------------------------------------------------------
     #: URL Redis для продуктового кэша. ОПЦИОНАЛЬНО: без него кэш работает на

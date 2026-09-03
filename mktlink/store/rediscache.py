@@ -50,15 +50,16 @@ import json
 import logging
 from typing import Any, Final
 
+from mktlink.constants import CACHE_STALE_HORIZON_S
+
 log = logging.getLogger(__name__)
 
 #: Сколько ждать Redis. Мало намеренно — см. докстроку модуля.
 SOCKET_TIMEOUT_S: Final[float] = 0.2
 
-#: Сколько запись живёт в Redis. Это горизонт УСТАРЕВАНИЯ, а не свежести:
-#: столько времени запись ещё может быть отдана как старая с указанием
-#: возраста. Неделя — с запасом над суточным ``max_stale_s``.
-STALE_HORIZON_S: Final[int] = 7 * 24 * 3600
+#: Псевдоним. Число живёт в :mod:`mktlink.constants` рядом с обоими TTL,
+#: потому что оно их верхняя граница и граница ``max_stale_s``.
+STALE_HORIZON_S: Final[int] = CACHE_STALE_HORIZON_S
 
 #: Префикс ключей. Версия в нём означает, что смена формы значения не требует
 #: чистки: старые ключи просто перестают читаться и истекают сами.

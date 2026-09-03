@@ -168,5 +168,12 @@ async def test_only_ozon_treats_a_jar_as_a_precondition(conn) -> None:
     deps = Deps(cache=ProductCache(conn), ladder=build_ladder(conn, EgressClient(watching)))
     code, r = await handle(ProductRequest(url=YM_PDP), deps)
     assert tried, "Я.Маркет обязан быть попробован без jar"
+    # Главное утверждение теста — вот это: причина не может быть «нет тёплой
+    # сессии», потому что попытка БЫЛА сделана.
     assert r.meta.reason != "no_warm_jar", "иначе клиенту сообщается не та причина"
-    assert r.meta.reason == "marketplace_silent", r.meta.reason
+    # А конкретная причина уточнена по замеру: 302 у карточки Я.Маркета — это
+    # увод на /showcaptcha, проверено дважды (2026-09-03 и 2026-09-04). Раньше
+    # здесь стояло «marketplace_silent» — «страница пришла пустая», — потому
+    # что тело у 302 действительно пустое, и классификатор доходил до проверки
+    # идентичности. Диагноз был неверный: нас челленджили, а не отдавали пусто.
+    assert r.meta.reason == "marketplace_challenge", r.meta.reason

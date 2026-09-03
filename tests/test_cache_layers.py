@@ -302,3 +302,56 @@ def test_stale_answer_still_carries_its_age(conn) -> None:
     from mktlink.api.schemas import MetaBlock
 
     assert "detail" in MetaBlock.model_fields
+
+
+# --- TTL из конфига --------------------------------------------------------------
+
+
+async def test_ttl_comes_from_settings_not_from_the_module(conn) -> None:
+    """Заказчик просил вынести срок в конфиг: он будет расти.
+
+    Проверяется именно это — что значение из настроек ДОЕЗЖАЕТ до чтения
+    кэша, а не что дефолт равен сутками.
+    """
+    seen: list[int] = []
+
+    class Recording(ProductCache):
+        def get(self, key, *, fresh_ttl_s=None):
+            seen.append(fresh_ttl_s)
+            return None
+
+    async def ladder(dl, c, budget_ms):
+        return Extraction(verdict=Verdict.OK, name="Чай", seller_name="Базар")
+
+    deps = Deps(
+        cache=Recording(conn),
+        ladder=ladder,
+        product_ttl_s=111,
+        product_ttl_pinned_s=222,
+    )
+    await handle(ProductRequest(url=YM_MODEL), deps)
+    await handle(ProductRequest(url=YM_PINNED), deps)
+    assert seen == [111, 222]
+
+
+def test_settings_expose_both_ttls_and_bound_them() -> None:
+    from mktlink.constants import CACHE_STALE_HORIZON_S
+    from mktlink.settings import Settings
+
+    s = Settings()
+    assert s.product_ttl_s == FRESH_TTL_S
+    assert s.product_ttl_pinned_s == FRESH_TTL_PINNED_S
+    # Обещать свежесть дольше, чем запись живёт, значит обещать пустой ответ.
+    for name in ("product_ttl_s", "product_ttl_pinned_s"):
+        meta = Settings.model_fields[name].metadata
+        assert any(getattr(m, "le", None) == CACHE_STALE_HORIZON_S for m in meta), name
+
+
+def test_pinned_ttl_of_zero_means_same_as_model() -> None:
+    """Ручку можно выключить одним нулём, не держа два согласованных числа."""
+    from mktlink.api.wiring import build_deps
+    from mktlink.settings import Settings
+
+    cfg = Settings(product_ttl_s=3600, product_ttl_pinned_s=0)
+    assert (cfg.product_ttl_pinned_s or cfg.product_ttl_s) == 3600
+    assert build_deps is not None

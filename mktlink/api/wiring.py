@@ -286,6 +286,10 @@ def build_deps(settings: Settings | None = None, conn: sqlite3.Connection | None
         # обязана проверять ту лестницу, по которой запрос реально пойдёт.
         api_marketplaces=api_mps,
         unwound=UnwoundLinks(c),
+        product_ttl_s=cfg.product_ttl_s,
+        # 0 означает «как модельный»: ручка есть, но выключаема одним нулём,
+        # а не требует держать два согласованных числа.
+        product_ttl_pinned_s=cfg.product_ttl_pinned_s or cfg.product_ttl_s,
         # Требование 2 подключено здесь и только здесь. Раскрутка идёт прямым
         # егрессом: каждый её хоп через прокси взял бы слот спейсинга, и при
         # интервале Ozon в 5 с лестницы для короткой ссылки не осталось бы.
