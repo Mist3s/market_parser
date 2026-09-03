@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -32,8 +33,14 @@ from mktlink.marketplaces.verdict import USABLE, SellerStatus, Verdict
 from mktlink.store.cache import FRESH_TTL_PINNED_S, FRESH_TTL_S
 from mktlink.timing.deadline import Deadline, DeadlineExceeded, bind, unbind
 from mktlink.urls.canonical import Canonical, canonicalise
+from mktlink.urls.redirects import (
+    CrossedMarketplace,
+    NotARedirect,
+    RedirectLoop,
+    TooManyHops,
+)
 from mktlink.urls.registry import NotAProductUrl, UnknownHost, match_path
-from mktlink.urls.ssrf import UnwindChallenged, looks_like_challenge_host
+from mktlink.urls.ssrf import SsrfRejected, UnwindChallenged, looks_like_challenge_host
 from mktlink.urls.validate import UrlRejected, validate
 
 
@@ -70,9 +77,7 @@ class Cache(Protocol):
         self, key: str, *, fresh_ttl_s: int | None = None
     ) -> dict[str, Any] | None: ...
     def get_stale(self, key: str, max_age_s: int) -> tuple[dict[str, Any], int] | None: ...
-    def put(
-        self, key: str, value: dict[str, Any], *, ttl_s: int | None = None
-    ) -> None: ...
+    def put(self, key: str, value: dict[str, Any]) -> None: ...
 
 
 @dataclass(slots=True)
@@ -202,6 +207,35 @@ async def _identify(
                 raise _Rejected(
                     _reject("deadline_exceeded", rid, url, marketplace=m.marketplace)
                 ) from None
+            except SsrfRejected as exc:
+                # Редирект увёл на приватный адрес. Это отказ ВХОДА: ссылка
+                # ведёт туда, куда мы не ходим.
+                raise _Rejected(
+                    _reject(
+                        "host_not_allowed",
+                        rid,
+                        url,
+                        marketplace=m.marketplace,
+                        detail={"reason": str(exc)[:200]},
+                    )
+                ) from None
+            except (TooManyHops, RedirectLoop, CrossedMarketplace, NotARedirect) as exc:
+                # Цепочка редиректов сломана: слишком длинная, циклическая,
+                # уводящая на другой маркетплейс или отсутствующая вовсе.
+                #
+                # Раньше все четыре улетали в общий обработчик и отдавались как
+                # 500 «capacity_exhausted». Для карточки это была экзотика, а
+                # для /v1/resolve — ШТАТНЫЙ исход: сломанная короткая ссылка
+                # есть нормальный вход эндпоинта, который её разворачивает.
+                raise _Rejected(
+                    _reject(
+                        "not_a_product_url",
+                        rid,
+                        url,
+                        marketplace=m.marketplace,
+                        detail={"unwind": type(exc).__name__},
+                    )
+                ) from None
             if deps.unwound is not None:
                 deps.unwound.put(url, resolved, hops)
         parsed, m = identify_one(resolved)
@@ -253,6 +287,10 @@ async def resolve(
         url=UrlBlock(submitted=req.url, canonical=c.url, hops=hops),
         marketplace=c.marketplace,
         product=_product_block(c),
+        # Продавца НЕ искали, и статус обязан говорить именно это. Дефолт
+        # SellerBlock — 'unknown_layout', то есть «смотрели разметку и не
+        # разобрались»: неудача разбора, которой здесь не было.
+        seller=SellerBlock(status=str(SellerStatus.NOT_REQUESTED)),
         offer=_offer_block(c),
         meta=MetaBlock(
             source="resolve",
@@ -280,9 +318,19 @@ async def _run(
     # закреплённом продавец — свойство ссылки, на модельном — снимок
     # аукциона. Разницу знает только этот уровень, поэтому он её и передаёт.
     fresh_ttl = FRESH_TTL_PINNED_S if c.offer else FRESH_TTL_S
-    hit = deps.cache.get(c.cache_key, fresh_ttl_s=fresh_ttl)
+    # force_refresh обходит кэш ЦЕЛИКОМ, включая память процесса. Без этого
+    # суточный срок свежести был бы односторонним: клиент мог разрешить старое,
+    # но не мог потребовать свежего.
+    hit = None if req.force_refresh else deps.cache.get(c.cache_key, fresh_ttl_s=fresh_ttl)
     if hit is not None:
-        return 200, _ok_from(hit, rid, req.url, c, hops, budget, dl, cache="hit")
+        # Возраст сообщается и на ПОПАДАНИИ, а не только на stale. При сроке
+        # 15 минут это было мелочью, при сутках — нет: ответ `ok, cache=hit`
+        # без возраста не даёт клиенту узнать, вчерашние это данные или
+        # секундные, и решить сам, устраивает ли его это.
+        age = max(0, int(time.time() - float(hit.get("fetched_at") or 0)))
+        return 200, _ok_from(
+            hit, rid, req.url, c, hops, budget, dl, cache="hit", age_s=age
+        )
 
     # --- лестница -------------------------------------------------------------
     via_api = c.marketplace in deps.api_marketplaces
@@ -327,7 +375,7 @@ async def _run(
 
     if ex.verdict in USABLE and ex.name:
         body = _body_from_extraction(ex, c)
-        deps.cache.put(c.cache_key, body, ttl_s=fresh_ttl)
+        deps.cache.put(c.cache_key, body)
         return 200, _ok_from(body, rid, req.url, c, hops, budget, dl, cache="miss", ex=ex)
 
     if ex.verdict is Verdict.NOT_FOUND:
@@ -493,6 +541,7 @@ def _ok_from(
     *,
     cache: str,
     ex: Extraction | None = None,
+    age_s: int | None = None,
 ) -> ProductResponse:
     status = body.get("seller_status", str(SellerStatus.UNKNOWN_LAYOUT))
     resolved = status in (str(SellerStatus.RESOLVED), str(SellerStatus.FIRST_PARTY))
@@ -534,5 +583,9 @@ def _ok_from(
             elapsed_ms=dl.elapsed_ms,
             cache=cache,  # type: ignore[arg-type]
             ledger=list(dl.spent),
+            # Возраст на попадании. В том же поле, что у stale-ответа, а не
+            # в новом: клиент читает возраст одинаково независимо от того,
+            # свежие данные или разрешённые старые.
+            detail={"age_s": age_s} if age_s is not None else {},
         ),
     )

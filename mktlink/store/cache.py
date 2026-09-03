@@ -139,12 +139,21 @@ class ProductCache:
             return None
         return self._decode(row), age
 
-    def put(self, key: str, value: dict[str, Any], *, ttl_s: int | None = None) -> None:
+    def put(self, key: str, value: dict[str, Any]) -> None:
         """Записать на все уровни.
 
         ``fetched_at`` кладётся В ЗНАЧЕНИЕ, а не только в колонку: Redis не
         умеет сказать, когда запись создана, а свежесть считается по возрасту.
         Без этого поля значение из Redis нельзя было бы отличить от свежего.
+
+        **Параметра ``ttl_s`` здесь нет, и это осознанное удаление.** Он был
+        добавлен вместе с суточным TTL и не мог повлиять ни на что: срок
+        Redis обязан быть горизонтом устаревания, а не свежести (иначе
+        ``get_stale`` не смог бы отдать старое), а сама свежесть решается
+        ПРИ ЧТЕНИИ по ``fetched_at`` и ``fresh_ttl_s`` вызывающего. Так что
+        записи знать срок не нужно вовсе — знать его нужно чтению. Параметр,
+        который вычисляется, передаётся и ничего не меняет, хуже, чем его
+        отсутствие: он выглядит работающим механизмом.
         """
         now = time.time()
         value = {**value, "fetched_at": int(now)}
@@ -152,9 +161,10 @@ class ProductCache:
         if self._redis is not None:
             from mktlink.store.rediscache import STALE_HORIZON_S  # noqa: PLC0415
 
-            # В Redis запись живёт горизонт устаревания, а не срок свежести:
-            # иначе get_stale не смог бы отдать старое с его возрастом.
-            self._redis_put(key, value, max(ttl_s or 0, STALE_HORIZON_S))
+            # Горизонт устаревания, один для всех записей: свежесть решает
+            # чтение, а срок здесь ограничивает лишь то, как долго запись
+            # ещё может быть отдана СТАРОЙ с указанием возраста.
+            self._redis_put(key, value, STALE_HORIZON_S)
         if self._conn is None:
             return
         self._conn.execute(
@@ -221,5 +231,16 @@ class ProductCache:
 
     @staticmethod
     def _decode(row: sqlite3.Row) -> dict[str, Any]:
+        """Значение из SQLite, датированное КОЛОНКОЙ, а не полем payload.
+
+        Колонка авторитетнее: она обновляется при конфликте вставки, а
+        payload — это снимок, каким его записали. Расхождение проявилось
+        тестом: искусственно состаренная запись отдавала возраст, взятый из
+        payload, то есть нулевой. Возвращаемое значение обязано описывать
+        себя одинаково, с какого бы уровня оно ни пришло, — иначе возраст в
+        ответе зависит от того, попал ли запрос в Redis или в SQLite.
+        """
         raw = row["payload"]
-        return json.loads(raw) if raw else {}
+        value: dict[str, Any] = json.loads(raw) if raw else {}
+        value["fetched_at"] = int(row["fetched_at"])
+        return value

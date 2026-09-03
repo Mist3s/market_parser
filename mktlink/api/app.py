@@ -20,6 +20,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from mktlink.api.apikey import COST
 from mktlink.api.errors import http_for
 from mktlink.api.routes import Deps, handle, resolve
 from mktlink.api.schemas import (
@@ -110,7 +111,10 @@ def create_app(
 
             try:
                 key = admission.authenticate(api_key)
-                admission.charge(key, "cold")
+                # Списываем по ХУДШЕМУ сценарию до работы, поэтому
+                # force_refresh обязан списаться как force_refresh, а не
+                # как cold: иначе самый дорогой вход стоит как обычный.
+                admission.charge(key, "force_refresh" if req.force_refresh else "cold")
             except Unauthorized:
                 return _deny("unauthorized", rid, req.url, None)
             except RateLimited as exc:
@@ -137,14 +141,19 @@ def create_app(
         if admission is not None and key is not None:
             # Возврат переплаты: списываем по худшему сценарию ДО работы,
             # иначе абьюзер, чьи запросы всегда падают, не платит ничего.
+            spent = COST["force_refresh"] if req.force_refresh else COST["cold"]
             actual = {
-                "ok": "cache_hit" if body.meta.cache == "hit" else "cold",
+                # Принудительный сброс кэша не может оказаться «попаданием
+                # в кэш»: он его обошёл. Возврата переплаты здесь нет.
+                "ok": "force_refresh"
+                if req.force_refresh
+                else ("cache_hit" if body.meta.cache == "hit" else "cold"),
                 "stale": "stale",
                 "invalid_url": "invalid_url",
                 "host_not_allowed": "unsupported_marketplace",
                 "not_a_product_url": "invalid_url",
             }.get(body.status, "cold")
-            admission.refund(key, 10, actual)
+            admission.refund(key, spent, actual)
 
         headers = {"X-Request-Id": rid}
         if body.meta.retry_after_seconds is not None:

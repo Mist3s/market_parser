@@ -120,11 +120,19 @@ def test_value_carries_its_own_timestamp(conn) -> None:
 
 
 def test_redis_ttl_is_the_stale_horizon_not_the_fresh_ttl(conn) -> None:
-    """Иначе устаревшая запись исчезала бы раньше, чем её могли попросить."""
+    """Иначе устаревшая запись исчезала бы раньше, чем её могли попросить.
+
+    Срок один для всех записей, и параметра у ``put`` нет: свежесть решается
+    ПРИ ЧТЕНИИ по ``fetched_at``, поэтому записи знать срок не нужно. Ранее
+    здесь передавался ``ttl_s``, который вычислялся, доезжал до слоя и не мог
+    повлиять ни на что — ``max(ttl_s, STALE_HORIZON_S)`` всегда давал второе,
+    потому что ``FRESH_TTL_PINNED_S == STALE_HORIZON_S``.
+    """
     r = FakeRedis()
-    ProductCache(conn, redis=r).put("k", {"name": "Чай"}, ttl_s=FRESH_TTL_S)
-    assert r.data["k"]["_ttl"] >= STALE_HORIZON_S
+    ProductCache(conn, redis=r).put("k", {"name": "Чай"})
+    assert r.data["k"]["_ttl"] == STALE_HORIZON_S
     assert STALE_HORIZON_S > FRESH_TTL_S
+    assert "ttl_s" not in ProductCache.put.__code__.co_varnames
 
 
 def test_stale_read_uses_the_timestamp_from_redis(conn) -> None:
@@ -228,3 +236,69 @@ async def test_budget_below_the_api_lane_floor_is_an_input_error(conn) -> None:
     assert body.status == "invalid_budget"
     assert body.meta.detail["via_api"] is True
     assert body.meta.detail["need_ms"] > body.meta.detail["have_ms"]
+
+
+# --- D6: суточный кэш обязан быть честным и обратимым ---------------------------
+
+
+async def test_age_is_reported_on_a_cache_hit(conn) -> None:
+    """Без возраста ответ `ok, cache=hit` не отличим на вчерашних и секундных данных.
+
+    При сроке 15 минут это была мелочь. При сутках клиент обязан иметь
+    возможность решить сам, устраивает ли его такой возраст.
+    """
+    cache = ProductCache(conn)
+    key = "pl:v1:ym:s101814267477@*"
+    cache.put(key, {"name": "Чай", "seller_status": "resolved", "seller_name": "Базар"})
+    conn.execute(
+        "UPDATE product SET fetched_at = unixepoch() - 7200 WHERE cache_key = ?", (key,)
+    )
+    cache._mem.clear()  # noqa: SLF001
+
+    async def never(dl, c, budget_ms):
+        raise AssertionError("должно отдаться из кэша")
+
+    code, body = await handle(
+        ProductRequest(url=YM_MODEL), Deps(cache=cache, ladder=never)
+    )
+    assert code == 200
+    assert body.meta.cache == "hit"
+    assert 7100 < body.meta.detail["age_s"] < 7300
+
+
+async def test_force_refresh_bypasses_every_level(conn) -> None:
+    """Включая память процесса: иначе сброс не сбрасывал бы самый быстрый уровень."""
+    cache = ProductCache(conn)
+    key = "pl:v1:ym:s101814267477@*"
+    cache.put(key, {"name": "Старое", "seller_status": "resolved", "seller_name": "Старый"})
+
+    calls: list[int] = []
+
+    async def ladder(dl, c, budget_ms):
+        calls.append(1)
+        return Extraction(verdict=Verdict.OK, name="Новое", seller_name="Новый")
+
+    deps = Deps(cache=cache, ladder=ladder)
+
+    _, cached = await handle(ProductRequest(url=YM_MODEL), deps)
+    assert cached.product.name == "Старое"
+    assert not calls
+
+    _, fresh = await handle(ProductRequest(url=YM_MODEL, force_refresh=True), deps)
+    assert calls == [1], "принудительный сброс обязан дойти до лестницы"
+    assert fresh.product.name == "Новое"
+    assert fresh.meta.cache == "miss"
+
+
+def test_force_refresh_is_the_most_expensive_input() -> None:
+    """Сброс кэша — самый дешёвый способ устроить нам DoS чужими руками."""
+    from mktlink.api.apikey import COST
+
+    assert COST["force_refresh"] > COST["cold"] > COST["cache_hit"]
+
+
+def test_stale_answer_still_carries_its_age(conn) -> None:
+    """Возраст на попадании не должен был вытеснить возраст на stale."""
+    from mktlink.api.schemas import MetaBlock
+
+    assert "detail" in MetaBlock.model_fields

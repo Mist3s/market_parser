@@ -198,3 +198,93 @@ def test_unwind_costs_less_than_a_card() -> None:
     assert COST["redirect_unwind"] < COST["cold"]
     assert COST["redirect_unwind"] == 2
     assert COST["cache_hit"] < COST["redirect_unwind"]
+
+
+# --- дефекты, найденные состязательным разбором ---------------------------------
+
+
+def test_unwind_key_ignores_spelling_and_tracking() -> None:
+    """D2. Четыре написания одной ссылки давали четыре раскрутки.
+
+    Самое частое из них — с utm-меткой: ссылку пересылают из мессенджера, и
+    он её дописывает. То есть кэш не попадал именно в основном случае.
+    """
+    from mktlink.store.unwound import normalise
+
+    spellings = [
+        "https://ozon.ru/t/AbC123",
+        "https://www.ozon.ru/t/AbC123",
+        "https://ozon.ru/t/AbC123/",
+        "https://ozon.ru/t/AbC123?utm_source=tg",
+        "https://OZON.RU/t/AbC123#frag",
+    ]
+    assert len({normalise(s) for s in spellings}) == 1
+
+
+def test_different_codes_stay_different() -> None:
+    """Нормализация не имеет права склеивать РАЗНЫЕ ссылки."""
+    from mktlink.store.unwound import normalise
+
+    assert normalise("https://ozon.ru/t/AAA111") != normalise("https://ozon.ru/t/BBB222")
+    # И разные маркетплейсы тоже.
+    assert normalise("https://ozon.ru/t/X1234") != normalise("https://market.yandex.ru/cc/X1234")
+
+
+async def test_cache_hits_across_spellings(conn) -> None:
+    store = UnwoundLinks(conn)
+    res = _resolver(OZON_PDP, 2)
+    deps = _deps(conn, resolver=res, unwound=store)
+
+    await resolve(ResolveRequest(url="https://ozon.ru/t/AbC123"), deps)
+    await resolve(ResolveRequest(url="https://www.ozon.ru/t/AbC123?utm_source=tg"), deps)
+    assert len(res.calls) == 1, "второе написание обязано попасть в кэш"
+
+
+async def test_seller_status_says_we_did_not_look(conn) -> None:
+    """D3. Дефолт нёс `unknown_layout` — «смотрели и не разобрались»."""
+    from mktlink.marketplaces.verdict import SellerStatus
+
+    _, body = await resolve(ResolveRequest(url=YM_PDP), _deps(conn))
+    assert body.seller.status == str(SellerStatus.NOT_REQUESTED)
+    assert body.seller.status != "unknown_layout"
+
+
+async def test_broken_redirect_chain_is_422_not_500(conn) -> None:
+    """D4. Четыре исключения раскрутки улетали в общий обработчик.
+
+    Для эндпоинта, который разворачивает ссылки, сломанная цепочка — штатный
+    вход, а не внутренняя ошибка сервиса.
+    """
+    from mktlink.urls.redirects import (
+        CrossedMarketplace,
+        NotARedirect,
+        RedirectLoop,
+        TooManyHops,
+    )
+
+    for exc in (
+        TooManyHops("https://ozon.ru/t/x", 4),
+        RedirectLoop("loop"),
+        CrossedMarketplace("ozon -> ym"),
+        NotARedirect("no location"),
+    ):
+        async def failing(dl, url, mp, _e=exc):
+            raise _e
+
+        code, body = await resolve(
+            ResolveRequest(url=OZON_SHORT), _deps(conn, resolver=failing)
+        )
+        assert code == 422, type(exc).__name__
+        assert body.status == "not_a_product_url"
+        assert body.meta.detail["unwind"] == type(exc).__name__
+
+
+async def test_ssrf_during_unwind_is_an_input_error(conn) -> None:
+    from mktlink.urls.ssrf import SsrfRejected
+
+    async def failing(dl, url, mp):
+        raise SsrfRejected("private address", "10.0.0.1")
+
+    code, body = await resolve(ResolveRequest(url=OZON_SHORT), _deps(conn, resolver=failing))
+    assert code == 422
+    assert body.status == "host_not_allowed"

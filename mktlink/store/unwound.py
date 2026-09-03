@@ -20,8 +20,39 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from mktlink.urls.redirects import shortlink_key
+
+
+def normalise(short_url: str) -> str:
+    """Свести написания одной короткой ссылки к одному ключу.
+
+    Без этого кэш не попадал в основном рабочем случае. ЗАМЕРЕНО на четырёх
+    написаниях одной ссылки — ``ozon.ru/t/AbC123``,
+    ``www.ozon.ru/t/AbC123``, тот же со слэшем на конце и тот же с
+    ``?utm_source=tg``: четыре разных ключа, четыре раскрутки, четыре записи.
+    А именно последнее написание и приходит чаще всего: ссылку пересылают из
+    мессенджера, и он дописывает метку.
+
+    Что отбрасывается и почему это безопасно:
+
+    * **query и фрагмент целиком.** У обеих наших коротких форм код лежит в
+      ПУТИ (``/t/<code>`` у Ozon, ``/cc/<code>`` у Я.Маркета — см.
+      :mod:`mktlink.urls.registry`), поэтому никакой параметр не может
+      изменить, куда ссылка ведёт. Всё, что в query, — трекинг.
+    * **префикс ``www.`` и регистр хоста.** Хост нечувствителен к регистру
+      по стандарту, а ``www`` у обоих маркетплейсов ведёт туда же.
+    * **слэш в конце пути.** Тот же ресурс.
+
+    Схема (``https``) не отбрасывается: валидатор всё равно не пропускает
+    ничего другого, и подменять её здесь значило бы прятать это правило в
+    неожиданном месте.
+    """
+    parts = urlsplit(short_url)
+    host = (parts.hostname or "").lower().removeprefix("www.")
+    path = parts.path.rstrip("/") or "/"
+    return f"{parts.scheme.lower()}://{host}{path}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,7 +72,7 @@ class UnwoundLinks:
     def get(self, short_url: str) -> Unwound | None:
         row = self.conn.execute(
             "SELECT canonical, hops FROM shortlink WHERE short_sha256 = ?",
-            (shortlink_key(short_url),),
+            (shortlink_key(normalise(short_url)),),
         ).fetchone()
         if row is None:
             return None
@@ -54,9 +85,9 @@ class UnwoundLinks:
             " canonical = excluded.canonical,"
             " hops = excluded.hops,"
             " resolved_at = unixepoch()",
-            (shortlink_key(short_url), canonical, hops),
+            (shortlink_key(normalise(short_url)), canonical, hops),
         )
         self.conn.commit()
 
 
-__all__ = ["Unwound", "UnwoundLinks"]
+__all__ = ["Unwound", "UnwoundLinks", "normalise"]
