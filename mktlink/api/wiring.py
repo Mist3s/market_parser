@@ -257,6 +257,11 @@ def build_deps(settings: Settings | None = None, conn: sqlite3.Connection | None
 
     c = conn or connect(cfg.db_path)
     client = EgressClient()
+    # Redis необязателен: без URL всё работает на SQLite, как раньше.
+    from mktlink.store.rediscache import open_layer  # noqa: PLC0415
+    from mktlink.store.unwound import UnwoundLinks  # noqa: PLC0415
+
+    redis_layer = open_layer(cfg.redis_url)
     # Второй клиент поднимается ТОЛЬКО когда ключ задан. Без ключа система
     # ведёт себя ровно как до появления скрейпинг-API, и это важно: путь
     # через чужой сервис не должен включаться сам собой.
@@ -275,8 +280,12 @@ def build_deps(settings: Settings | None = None, conn: sqlite3.Connection | None
         )
         api_mps = frozenset(cfg.scrapedo_marketplaces)
     return Deps(
-        cache=ProductCache(c),
+        cache=ProductCache(c, redis=redis_layer),
         ladder=build_ladder(c, client, api_client=api_client, api_marketplaces=api_mps),
+        # Тот же набор уходит и в Deps: предпроверка бюджета в routes.py
+        # обязана проверять ту лестницу, по которой запрос реально пойдёт.
+        api_marketplaces=api_mps,
+        unwound=UnwoundLinks(c),
         # Требование 2 подключено здесь и только здесь. Раскрутка идёт прямым
         # егрессом: каждый её хоп через прокси взял бы слот спейсинга, и при
         # интервале Ozon в 5 с лестницы для короткой ссылки не осталось бы.

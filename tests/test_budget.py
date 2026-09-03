@@ -32,7 +32,10 @@ from mktlink.constants import (
     TAIL_MS,
 )
 
-BUDGETS = (3675, 5000, 8000, 12000, 15000)
+#: 30000 добавлен вместе с поднятием потолка: тождество бюджета обязано
+#: держаться и на новом максимуме, иначе оно проверялось бы только там,
+#: где бюджета уже не бывает.
+BUDGETS = (3675, 5000, 8000, 12000, 15000, 30000)
 HOPS = (0, 1, 2, 3)
 
 
@@ -159,7 +162,10 @@ def test_render_option_still_balances() -> None:
 
 def test_client_timeout_hint() -> None:
     assert CLIENT_TIMEOUT_MARGIN_MS == 500
-    assert RESPONSE_BUDGET_MAX_MS + CLIENT_TIMEOUT_MARGIN_MS == 15_500
+    # Проверяется ПРАВИЛО «подсказка = потолок + маржа», а не конкретная
+    # сумма: вписанное число делает тест копией константы, и при её
+    # изменении он падает, ничего не поймав.
+    assert RESPONSE_BUDGET_MAX_MS + CLIENT_TIMEOUT_MARGIN_MS == 30_500
 
 
 def test_prewait_below_guard_is_exactly_when_spacing_can_force_a_202() -> None:

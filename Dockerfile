@@ -31,7 +31,10 @@ sys.exit('browser leaked into the api image: %s' % bad) if bad else None"
 EXPOSE 8000
 CMD ["uvicorn", "mktlink.api.app:create_app", "--factory", \
      "--host", "0.0.0.0", "--port", "8000", \
-     "--timeout-keep-alive", "20", "--workers", "1"]
+     # 35 > RESPONSE_BUDGET_MAX_MS (30 с): keep-alive не влияет на запрос
+     # в полёте, но держать его НИЖЕ потолка ответа — это противоречие в
+     # конфигурации, которое однажды прочитают как настоящее ограничение.
+     "--timeout-keep-alive", "35", "--workers", "1"]
 
 # --- forge: браузер и владение proxy6 -----------------------------------
 FROM mcr.microsoft.com/playwright/python:v1.48.0-noble AS forge

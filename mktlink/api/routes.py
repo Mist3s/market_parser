@@ -22,12 +22,14 @@ from mktlink.api.schemas import (
     ProductBlock,
     ProductRequest,
     ProductResponse,
+    ResolveRequest,
     SellerBlock,
     UrlBlock,
 )
 from mktlink.budget import BudgetTooSmall, plan
-from mktlink.constants import BUDGET_FLOOR_MS
+from mktlink.constants import BUDGET_FLOOR_MS, RESOLVE_BUDGET_MS
 from mktlink.marketplaces.verdict import USABLE, SellerStatus, Verdict
+from mktlink.store.cache import FRESH_TTL_PINNED_S, FRESH_TTL_S
 from mktlink.timing.deadline import Deadline, DeadlineExceeded, bind, unbind
 from mktlink.urls.canonical import Canonical, canonicalise
 from mktlink.urls.registry import NotAProductUrl, UnknownHost, match_path
@@ -64,9 +66,13 @@ class Ladder(Protocol):
 
 
 class Cache(Protocol):
-    def get(self, key: str) -> dict[str, Any] | None: ...
+    def get(
+        self, key: str, *, fresh_ttl_s: int | None = None
+    ) -> dict[str, Any] | None: ...
     def get_stale(self, key: str, max_age_s: int) -> tuple[dict[str, Any], int] | None: ...
-    def put(self, key: str, value: dict[str, Any]) -> None: ...
+    def put(
+        self, key: str, value: dict[str, Any], *, ttl_s: int | None = None
+    ) -> None: ...
 
 
 @dataclass(slots=True)
@@ -76,7 +82,16 @@ class Deps:
     cache: Cache
     ladder: Ladder
     resolver: Resolver | None = None
-    budget_ms: int = 15_000
+    #: Кэш раскрутки коротких ссылок. Без него раскрутка платится заново
+    #: при каждом запросе той же ссылки — до трёх хопов по 550 мс из
+    #: бюджета, хотя короткая ссылка неизменяема.
+    unwound: Any = None
+    #: Маркетплейсы, идущие через скрейпинг-API. Нужны ЗДЕСЬ, потому что
+    #: предпроверка бюджета обязана проверять ту лестницу, по которой
+    #: запрос реально пойдёт: у API-лейна полы 9000/4500 против 700/1100 у
+    #: собственного егресса, и разница больше, чем весь бюджет 5 с.
+    api_marketplaces: frozenset[str] = frozenset()
+    budget_ms: int = 30_000
     ym_region_id: int = 213
 
 
@@ -99,62 +114,194 @@ async def handle(
         unbind(token)
 
 
+class _Rejected(Exception):
+    """Отказ, поднятый из общего опознания ссылки.
+
+    Исключение, а не возврат кортежа: опознание вызывается из двух эндпоинтов
+    с разными типами ответа, и «либо результат, либо готовый ответ» в двух
+    местах читается хуже, чем один перехват.
+    """
+
+    def __init__(self, response: tuple[int, ProductResponse]) -> None:
+        self.response = response
+        super().__init__(response[1].status)
+
+
+async def _identify(
+    url: str, deps: Deps, dl: Deadline, rid: str
+) -> tuple[Canonical, int, bool]:
+    """Стадии 1–5: разобрать, опознать, при необходимости раскрутить.
+
+    Общая часть двух эндпоинтов. ``/v1/resolve`` на этом заканчивается,
+    ``/v1/product`` идёт дальше в кэш и лестницу.
+
+    Третий элемент — БЫЛА ли раскрутка взята из кэша. Возвращается, а не
+    выводится вызывающим: попытка вывести его из числа хопов дала прямую
+    неправду — первый же ответ отрапортовал ``cache=hit`` на пустом кэше,
+    потому что хопы больше нуля бывают и при живой раскрутке.
+    """
+    # Разбор и опознание применяются ДВА раза: к поданной ссылке и к тому, что
+    # отдала раскрутка. Раньше второй раз шёл без обработки ошибок вовсе, и
+    # короткая ссылка, ведущая на КАТЕГОРИЮ, роняла запрос: ``match_path``
+    # бросает ``NotAProductUrl``, а не возвращает не-pdp совпадение, поэтому
+    # проверка ``if not m.is_pdp`` до этого исключения не доживала. Клиент
+    # получал 500 вместо 422. Общая функция закрывает это по построению: два
+    # вызова одного кода не могут разойтись в обработке.
+    def identify_one(candidate: str):
+        try:
+            p = validate(candidate)
+        except UrlRejected as exc:
+            raise _Rejected(
+                _reject(exc.code, rid, candidate, detail={"reason": exc.detail})
+            ) from None
+        try:
+            return p, match_path(p.host, p.path)
+        except UnknownHost:
+            # Челлендж, уехавший на чужой хост, — это блок маркетплейса, а не
+            # плохая ссылка. Отвечать 422 здесь значит врать клиенту.
+            if looks_like_challenge_host(p.host):
+                raise _Rejected(_reject("unwind_challenged", rid, candidate)) from None
+            raise _Rejected(
+                _reject("host_not_allowed", rid, candidate, detail={"host": p.host})
+            ) from None
+        except NotAProductUrl as exc:
+            raise _Rejected(
+                _reject(
+                    "not_a_product_url",
+                    rid,
+                    candidate,
+                    marketplace=exc.marketplace,
+                    detail={"classified": exc.classified} if exc.classified else {},
+                )
+            ) from None
+
+    parsed, m = identify_one(url)
+    hops = 0
+    from_cache = False
+    if m.is_shortlink:
+        # Кэш раскрутки: короткая ссылка неизменяема, поэтому попадание здесь
+        # экономит целые сетевые хопы из бюджета, а не микросекунды.
+        cached = deps.unwound.get(url) if deps.unwound is not None else None
+        if cached is not None:
+            resolved, hops = cached.canonical, cached.hops
+            from_cache = True
+        else:
+            if deps.resolver is None:
+                raise _Rejected(
+                    _reject("not_a_product_url", rid, url, marketplace=m.marketplace)
+                ) from None
+            try:
+                resolved, hops = await deps.resolver(dl, url, m.marketplace)
+            except UnwindChallenged:
+                raise _Rejected(
+                    _reject("unwind_challenged", rid, url, marketplace=m.marketplace)
+                ) from None
+            except DeadlineExceeded:
+                # Канонический URL так и не получен — единственный случай,
+                # когда 504 отдаётся без него.
+                raise _Rejected(
+                    _reject("deadline_exceeded", rid, url, marketplace=m.marketplace)
+                ) from None
+            if deps.unwound is not None:
+                deps.unwound.put(url, resolved, hops)
+        parsed, m = identify_one(resolved)
+        if not m.is_pdp:
+            # Раскрутка привела на нашу форму, но не на карточку: например
+            # короткая ссылка на подборку. Это отказ входа, а не наша ошибка.
+            raise _Rejected(
+                _reject("not_a_product_url", rid, resolved, marketplace=m.marketplace)
+            ) from None
+
+    return canonicalise(parsed.host, parsed.path, parsed.query, m), hops, from_cache
+
+
+async def resolve(
+    req: ResolveRequest, deps: Deps, *, request_id: str | None = None
+) -> tuple[int, ProductResponse]:
+    """Короткая ссылка -> каноническая. Ни одного запроса к карточке.
+
+    Отдельный эндпоинт существует ради бюджета вызывающего: раскрутка стоит до
+    трёх хопов, а карточка — до 25 секунд и до 35 кредитов скрейпинг-API.
+    Клиент, который один раз развернул ссылку и сохранил канонический URL,
+    больше за раскрутку не платит НИКОГДА — ни временем, ни кредитами.
+
+    Ответ — тот же конверт ``ProductResponse``, но ``meta.source = "resolve"``
+    и все извлекаемые поля пусты. Это честно: мы не смотрели карточку, поэтому
+    ``product.name`` и ``seller`` здесь ``null`` не потому, что не нашли, а
+    потому что не искали. Отдельная схема ответа не вводится намеренно —
+    таксономия отказов у двух эндпоинтов одна и та же, и дублировать её
+    значило бы получить два расходящихся списка кодов.
+    """
+    rid = request_id or uuid.uuid4().hex
+    # Бюджет раскрутки не зависит от ручки ответа: тут нет ни лестницы, ни
+    # ступеней, только хопы. Потолок задан своим числом, чтобы 30 секунд,
+    # выведенные из времени карточки Ozon, не превращались в разрешение
+    # тридцать секунд гоняться за редиректами.
+    budget = min(RESOLVE_BUDGET_MS, req.max_wait_ms or RESOLVE_BUDGET_MS)
+    dl = Deadline.start(budget - 100, rid)
+    token = bind(dl)
+    try:
+        c, hops, unwind_cached = await _identify(req.url, deps, dl, rid)
+    except _Rejected as exc:
+        return exc.response
+    finally:
+        unbind(token)
+
+    return 200, ProductResponse(
+        status="ok",
+        request_id=rid,
+        url=UrlBlock(submitted=req.url, canonical=c.url, hops=hops),
+        marketplace=c.marketplace,
+        product=_product_block(c),
+        offer=_offer_block(c),
+        meta=MetaBlock(
+            source="resolve",
+            budget_ms=budget,
+            elapsed_ms=dl.elapsed_ms,
+            ledger=list(dl.spent),
+            # Честно: попадание в кэш РАСКРУТКИ, а не в продуктовый кэш.
+            # На этом эндпоинте продуктового кэша нет вовсе.
+            cache="hit" if unwind_cached else "miss",
+        ),
+    )
+
+
 async def _run(
     req: ProductRequest, deps: Deps, dl: Deadline, rid: str, budget: int
 ) -> tuple[int, ProductResponse]:
-    # --- стадии 1-3: чистый CPU, ни одного открытого сокета ------------------
+    # --- стадии 1-5: разбор, опознание, раскрутка ----------------------------
     try:
-        parsed = validate(req.url)
-    except UrlRejected as exc:
-        return _reject(exc.code, rid, req.url, detail={"reason": exc.detail})
-
-    try:
-        m = match_path(parsed.host, parsed.path)
-    except UnknownHost:
-        # Челлендж, уехавший на чужой хост, — это блок маркетплейса, а не
-        # плохая ссылка. Отвечать 422 здесь значит врать клиенту.
-        if looks_like_challenge_host(parsed.host):
-            return _reject("unwind_challenged", rid, req.url)
-        return _reject("host_not_allowed", rid, req.url, detail={"host": parsed.host})
-    except NotAProductUrl as exc:
-        return _reject(
-            "not_a_product_url",
-            rid,
-            req.url,
-            marketplace=exc.marketplace,
-            detail={"classified": exc.classified} if exc.classified else {},
-        )
-
-    hops = 0
-
-    # --- стадия 5: раскрутка, только для собственных шорт-форм ---------------
-    if m.is_shortlink:
-        if deps.resolver is None:
-            return _reject("not_a_product_url", rid, req.url, marketplace=m.marketplace)
-        try:
-            resolved, hops = await deps.resolver(dl, req.url, m.marketplace)
-        except UnwindChallenged:
-            return _reject("unwind_challenged", rid, req.url, marketplace=m.marketplace)
-        except DeadlineExceeded:
-            # Канонический URL так и не получен — единственный случай, когда
-            # 504 отдаётся без него.
-            return _reject("deadline_exceeded", rid, req.url, marketplace=m.marketplace)
-        parsed = validate(resolved)
-        m = match_path(parsed.host, parsed.path)
-        if not m.is_pdp:
-            return _reject("not_a_product_url", rid, resolved, marketplace=m.marketplace)
-
-    c = canonicalise(parsed.host, parsed.path, parsed.query, m)
+        c, hops, _ = await _identify(req.url, deps, dl, rid)
+    except _Rejected as exc:
+        return exc.response
 
     # --- стадия 4/6: кэш ------------------------------------------------------
-    hit = deps.cache.get(c.cache_key)
+    # Срок свежести зависит от того, закреплён ли оффер в ссылке: на
+    # закреплённом продавец — свойство ссылки, на модельном — снимок
+    # аукциона. Разницу знает только этот уровень, поэтому он её и передаёт.
+    fresh_ttl = FRESH_TTL_PINNED_S if c.offer else FRESH_TTL_S
+    hit = deps.cache.get(c.cache_key, fresh_ttl_s=fresh_ttl)
     if hit is not None:
         return 200, _ok_from(hit, rid, req.url, c, hops, budget, dl, cache="hit")
 
     # --- лестница -------------------------------------------------------------
+    via_api = c.marketplace in deps.api_marketplaces
     try:
-        plan(budget, c.marketplace, hops)
-    except BudgetTooSmall:
+        plan(budget, c.marketplace, hops, via_api=via_api)
+    except BudgetTooSmall as exc:
+        # Клиент САМ понизил бюджет ниже пола лейна — это ошибка входа, и
+        # отвечать на неё «попробуй позже» значит обещать, что от повтора
+        # что-то изменится. Не изменится: пол лейна постоянен.
+        if req.max_wait_ms is not None:
+            return _reject(
+                "invalid_budget",
+                rid,
+                req.url,
+                marketplace=c.marketplace,
+                detail={"need_ms": exc.need, "have_ms": exc.have, "via_api": via_api},
+            )
+        # Бюджета не хватает при НАСТРОЙКЕ сервиса — это наша проблема, и
+        # повтор осмыслен: лейн мог быть медленным временно.
         return _pending(
             rid, req.url, c, hops, budget, dl, reason="spacing_wait_exceeds_budget"
         )
@@ -163,10 +310,24 @@ async def _run(
         ex = await deps.ladder(dl, c, budget)
     except DeadlineExceeded:
         ex = Extraction(verdict=Verdict.BUDGET_EXHAUSTED, reason="deadline_exhausted")
+    except BudgetTooSmall as exc:
+        # Второй перехват — не паранойя, а закрытие проверенного дефекта.
+        # Предпроверка выше смотрит ОДНУ лестницу, а лестница внутри может
+        # оказаться другой (хопы, флаг рендера, смена транспорта). Раньше это
+        # исключение улетало мимо handle(), который ловит только
+        # DeadlineExceeded, и клиент получал 500 «capacity_exhausted» — то
+        # есть «у сервиса кончилась ёмкость» вместо «ваш бюджет мал».
+        return _reject(
+            "invalid_budget",
+            rid,
+            req.url,
+            marketplace=c.marketplace,
+            detail={"need_ms": exc.need, "have_ms": exc.have},
+        )
 
     if ex.verdict in USABLE and ex.name:
         body = _body_from_extraction(ex, c)
-        deps.cache.put(c.cache_key, body)
+        deps.cache.put(c.cache_key, body, ttl_s=fresh_ttl)
         return 200, _ok_from(body, rid, req.url, c, hops, budget, dl, cache="miss", ex=ex)
 
     if ex.verdict is Verdict.NOT_FOUND:

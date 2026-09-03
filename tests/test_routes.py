@@ -264,7 +264,12 @@ async def test_stale_is_offered_only_with_permission_and_always_with_its_age(tmp
     async def blocked(dl, c, budget_ms):
         return Extraction(verdict=Verdict.SILENT_EMPTY, reason="no_warm_jar")
 
-    code, r = await call(YM_PDP, deps(ladder=blocked, cache=cache), max_stale_s=3600)
+    # Разрешение считается ОТ срока свежести, а не круглым числом: иначе тест
+    # ломается при каждом изменении FRESH_TTL_S и проверяет константу, а не
+    # правило «устаревшее отдаётся только с разрешения».
+    code, r = await call(
+        YM_PDP, deps(ladder=blocked, cache=cache), max_stale_s=FRESH_TTL_S + 3600
+    )
     assert code == 200 and r.status == "stale"
     assert r.meta.degraded is True
     assert r.meta.detail["age_s"] >= FRESH_TTL_S

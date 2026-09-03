@@ -6,7 +6,11 @@ from fastapi.testclient import TestClient
 
 from mktlink.api.app import create_app
 from mktlink.api.routes import Deps, Extraction
-from mktlink.constants import RETRY_AFTER_MINT_S
+from mktlink.constants import (
+    CLIENT_TIMEOUT_MARGIN_MS,
+    RESPONSE_BUDGET_DEFAULT_MS,
+    RETRY_AFTER_MINT_S,
+)
 from mktlink.marketplaces.verdict import SellerStatus, Verdict
 from mktlink.store.cache import ProductCache
 
@@ -81,5 +85,10 @@ def test_health_and_ready() -> None:
     c = client()
     assert c.get("/healthz").json()["ok"] is True
     ready = c.get("/readyz").json()
-    assert ready["budget_ms"] == 15000
-    assert ready["client_timeout_hint_ms"] == 15500
+    # Числа берутся из констант, а не вписаны: этот тест проверяет, что
+    # /readyz ОТДАЁТ обслуживаемый потолок, а не что потолок равен 15 с.
+    assert ready["budget_ms"] == RESPONSE_BUDGET_DEFAULT_MS
+    assert (
+        ready["client_timeout_hint_ms"]
+        == RESPONSE_BUDGET_DEFAULT_MS + CLIENT_TIMEOUT_MARGIN_MS
+    )

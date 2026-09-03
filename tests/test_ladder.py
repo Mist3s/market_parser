@@ -153,11 +153,25 @@ async def test_a_card_with_no_offers_is_a_complete_answer() -> None:
     assert ex.calls == ["ym.pdp_html"], "искать продавца дальше незачем — их нет"
 
 
-async def test_ozon_ladder_has_two_rungs_at_full_budget() -> None:
-    """Enrich-ступень выбрасывается первой: у Ozon гард 5000 не оставляет ей места."""
-    p = plan(15000, "ozon", 0)
-    assert [r.name for r in p.rungs] == ["ozon.composer_replay", "ozon.pdp_html_replay"]
-    assert "ozon.seller_widget" not in [r.name for r in p.rungs]
+async def test_ozon_enrich_rung_appears_only_when_the_guard_leaves_room() -> None:
+    """Enrich выбрасывается первой — но именно из-за гарда, а не навсегда.
+
+    Тест назывался «две ступени при полном бюджете» и был верен при
+    потолке 15 с. После поднятия до 30 с у Ozon появляется третья ступень,
+    и прежнее имя стало бы утверждением, противоположным поведению. Правило
+    же не изменилось: enrich допускается, когда после гарда 5000 остаётся
+    место её полу.
+    """
+    tight = plan(15000, "ozon", 0)
+    assert [r.name for r in tight.rungs] == [
+        "ozon.composer_replay",
+        "ozon.pdp_html_replay",
+    ]
+    assert "ozon.seller_widget" not in [r.name for r in tight.rungs]
+
+    roomy = plan(30000, "ozon", 0)
+    assert "ozon.seller_widget" in [r.name for r in roomy.rungs]
+    assert roomy.total() == roomy.net_ms
 
 
 async def test_a_rung_appears_in_the_ledger_exactly_once() -> None:

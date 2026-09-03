@@ -25,10 +25,12 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
+from mktlink.constants import MINT_HARD_CAP_MS
+
 Op = Literal["mint", "render", "ping"]
 
 #: Потолок минтинга. К ручке отношения не имеет: минтинг идёт вне запроса.
-MINT_HARD_CAP_MS = 25_000
+
 
 
 @dataclass(frozen=True, slots=True)

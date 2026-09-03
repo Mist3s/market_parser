@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from mktlink.constants import (
     BUDGET_FLOOR_MS,
+    RESOLVE_BUDGET_MS,
     RESPONSE_BUDGET_MAX_MS,
 )
 
@@ -48,7 +49,33 @@ class ProductRequest(BaseModel):
     #: такое значение значило бы обещать работу, которой не будет.
     max_wait_ms: Annotated[int, Field(ge=BUDGET_FLOOR_MS, le=RESPONSE_BUDGET_MAX_MS)] | None = None
     #: 0 — не отдавать устаревшее вовсе.
-    max_stale_s: Annotated[int, Field(ge=0, le=43200)] = 900
+    #:
+    #: Граница поднята с 12 часов до недели, а дефолт с 900 с до суток.
+    #:
+    #: Причина не в удобстве, а в цене промаха: карточка Ozon стоит 35
+    #: кредитов из 1000 в месяц, то есть около 28 карточек. Потолок в 12 часов
+    #: означал, что вчерашний правдивый ответ выбрасывается и покупается
+    #: заново, хотя ни одного скоропортящегося поля в ответе нет — цены в
+    #: схеме не существует вовсе.
+    #:
+    #: Неделя согласована с ``STALE_HORIZON_S``: дольше запись всё равно не
+    #: живёт, и обещать больше значило бы обещать пустой ответ.
+    max_stale_s: Annotated[int, Field(ge=0, le=604800)] = 86400
+
+
+class ResolveRequest(BaseModel):
+    """Вход эндпоинта раскрутки. Ни бюджета карточки, ни устаревания.
+
+    ``max_stale_s`` здесь отсутствует намеренно: раскрутка кэшируется без
+    срока, потому что короткая ссылка маркетплейса неизменяема. Параметр,
+    который ничего не меняет, — это обещание, которого нет.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: Annotated[str, Field(min_length=12, max_length=2048)]
+    #: Только понижение, как и у карточки. Пол — один хоп с валидацией.
+    max_wait_ms: Annotated[int, Field(ge=600, le=RESOLVE_BUDGET_MS)] | None = None
 
 
 class UrlBlock(BaseModel):

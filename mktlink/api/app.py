@@ -18,11 +18,40 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
+from pydantic import ValidationError
+
 from mktlink.api.errors import http_for
-from mktlink.api.routes import Deps, handle
-from mktlink.api.schemas import MetaBlock, ProductRequest, ProductResponse, UrlBlock
+from mktlink.api.routes import Deps, handle, resolve
+from mktlink.api.schemas import (
+    MetaBlock,
+    ProductRequest,
+    ProductResponse,
+    ResolveRequest,
+    UrlBlock,
+)
 from mktlink.constants import GLOBAL_SEMAPHORE, RETRY_AFTER_SHED_S
 from mktlink.settings import Settings
+
+#: Дефолт GET-формы держится в одном месте со схемой: раньше здесь стояло
+#: 900, а в схеме — своё значение, и две формы одного эндпоинта отвечали
+#: по-разному на один и тот же запрос без параметра.
+DEFAULT_MAX_STALE_S: int = ProductRequest.model_fields["max_stale_s"].default
+
+
+def _first(exc: Any) -> dict[str, Any]:
+    """Первая ошибка валидации в форме, пригодной для клиента.
+
+    Одна, а не все: у ``ProductRequest`` три поля, и вываливать полный список
+    pydantic-ошибок значит отдавать внутреннюю структуру модели наружу.
+    """
+    errors = exc.errors()
+    if not errors:
+        return {}
+    first = errors[0]
+    return {
+        "field": ".".join(str(x) for x in first.get("loc", ())),
+        "problem": first.get("msg", ""),
+    }
 
 
 def create_app(
@@ -49,12 +78,19 @@ def create_app(
     def _rid(header: str | None) -> str:
         return header or uuid.uuid4().hex
 
-    def _deny(status: str, rid: str, url: str, retry_after: int | None) -> JSONResponse:
+    def _deny(
+        status: str,
+        rid: str,
+        url: str,
+        retry_after: int | None,
+        *,
+        detail: dict[str, Any] | None = None,
+    ) -> JSONResponse:
         body = ProductResponse(
             status=status,  # type: ignore[arg-type]
             request_id=rid,
             url=UrlBlock(submitted=url),
-            meta=MetaBlock(retry_after_seconds=retry_after),
+            meta=MetaBlock(retry_after_seconds=retry_after, detail=detail or {}),
         )
         headers = {"X-Request-Id": rid}
         if retry_after is not None:
@@ -119,6 +155,66 @@ def create_app(
             status_code=code, content=body.model_dump(mode="json"), headers=headers
         )
 
+    async def _serve_resolve(req: ResolveRequest, rid: str, api_key: str | None) -> JSONResponse:
+        """Раскрутка короткой ссылки. Дешёвый эндпоинт, и цена это отражает.
+
+        Списывается ``redirect_unwind`` — 2 кредита против 10 за холодную
+        карточку. Число не выдумано: раскрутка стоит до трёх редиректов и ни
+        одного обращения к карточке, то есть ни одного кредита скрейпинг-API.
+        Брать за неё как за карточку значило бы наказывать клиента ровно за то
+        поведение, ради которого эндпоинт и сделан — развернуть ссылку один
+        раз и больше нас не трогать.
+        """
+        key = None
+        if admission is not None:
+            from mktlink.api.apikey import RateLimited, Unauthorized  # noqa: PLC0415
+
+            try:
+                key = admission.authenticate(api_key)
+                admission.charge(key, "redirect_unwind")
+            except Unauthorized:
+                return _deny("unauthorized", rid, req.url, None)
+            except RateLimited as exc:
+                return _deny("rate_limited", rid, req.url, exc.retry_after_s)
+
+        # Гейт ёмкости здесь НЕ применяется: раскрутка не берёт ни слот
+        # спейсинга, ни аренду прокси, ни кредит поставщика. Душить её вместе
+        # с карточками значило бы отказывать в дешёвой операции из-за
+        # перегрузки дорогой.
+        code, body = await resolve(req, deps, request_id=rid)
+
+        if admission is not None and key is not None and body.meta.cache == "hit":
+            # Попадание в кэш раскрутки не стоило даже редиректа.
+            admission.refund(key, 2, "cache_hit")
+
+        headers = {"X-Request-Id": rid}
+        if body.meta.retry_after_seconds is not None:
+            headers["Retry-After"] = str(body.meta.retry_after_seconds)
+        return JSONResponse(
+            status_code=code, content=body.model_dump(mode="json"), headers=headers
+        )
+
+    @app.post("/v1/resolve")
+    async def post_resolve(
+        req: ResolveRequest,
+        x_request_id: str | None = Header(default=None),
+        x_api_key: str | None = Header(default=None),
+    ) -> Any:
+        return await _serve_resolve(req, _rid(x_request_id), x_api_key)
+
+    @app.get("/v1/resolve")
+    async def get_resolve(
+        url: str = Query(...),
+        max_wait_ms: int | None = Query(default=None),
+        x_request_id: str | None = Header(default=None),
+        x_api_key: str | None = Header(default=None),
+    ) -> Any:
+        try:
+            req = ResolveRequest(url=url, max_wait_ms=max_wait_ms)
+        except ValidationError as exc:
+            return _deny("invalid_budget", _rid(x_request_id), url, None, detail=_first(exc))
+        return await _serve_resolve(req, _rid(x_request_id), x_api_key)
+
     @app.post("/v1/product")
     async def post_product(
         req: ProductRequest,
@@ -131,11 +227,25 @@ def create_app(
     async def get_product(
         url: str = Query(...),
         max_wait_ms: int | None = Query(default=None),
-        max_stale_s: int = Query(default=900),
+        max_stale_s: int = Query(default=DEFAULT_MAX_STALE_S),
         x_request_id: str | None = Header(default=None),
         x_api_key: str | None = Header(default=None),
     ) -> Any:
-        req = ProductRequest(url=url, max_wait_ms=max_wait_ms, max_stale_s=max_stale_s)
+        """GET-форма. Валидация тела ловится ЗДЕСЬ, а не общим обработчиком.
+
+        Дефект, который это закрывает, проверен живьём: ``Query`` объявлен без
+        границ, а ``ProductRequest`` собирается внутри обработчика, поэтому
+        ``ValidationError`` попадал в ``@app.exception_handler(Exception)`` и
+        клиент получал ``500 capacity_exhausted`` — «у сервиса кончилась
+        ёмкость» — вместо ``422 invalid_budget``. Оба конца диапазона давали
+        одну и ту же неправду: и ``max_wait_ms=100``, и ``max_wait_ms=999999``.
+        POST при этом отвечал корректно, потому что там модель разбирает
+        FastAPI до входа в обработчик.
+        """
+        try:
+            req = ProductRequest(url=url, max_wait_ms=max_wait_ms, max_stale_s=max_stale_s)
+        except ValidationError as exc:
+            return _deny("invalid_budget", _rid(x_request_id), url, None, detail=_first(exc))
         return await _serve(req, _rid(x_request_id), x_api_key)
 
     @app.get("/healthz")
