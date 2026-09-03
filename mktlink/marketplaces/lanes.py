@@ -68,6 +68,12 @@ class Lane:
     async def _get(
         self, dl: Deadline, url: str, cap_ms: int, stage_name: str, *, max_bytes: int
     ):
+        """Запрос ступени.
+
+        ``stage_name=None`` передаётся намеренно: стадию уже открыл
+        ``run_ladder``, и вторая с тем же именем удвоила бы строку леджера.
+        Имя оставлено в подписи, чтобы вызов читался, но клиенту не уходит.
+        """
         from mktlink.budget import stage_reserve_ms  # noqa: PLC0415
 
         return await self._client.fetch(
@@ -78,7 +84,7 @@ class Lane:
             reserve_ms=stage_reserve_ms(self.marketplace),
             jar=self._lease.jar,
             proxy_url=self._lease.proxy_url,
-            stage_name=stage_name,
+            stage_name=None,
             max_bytes=max_bytes,
         )
 

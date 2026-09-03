@@ -61,6 +61,18 @@ RETRY_AFTER: Final[dict[str, int]] = {
     "all_proxies_busy": RETRY_AFTER_FETCH_S,
     # Сброс нагрузки: ждём ёмкости, а не конкретной работы.
     "capacity": RETRY_AFTER_SHED_S,
+    # Отказ на стороне маркетплейса. Ждём как минтинг: быстрее смысла нет,
+    # потому что повтор через 3 с почти наверняка получит тот же челлендж,
+    # а разница между «подожди» и «не выйдет» — это работа метрики, не
+    # заголовка.
+    "marketplace_challenge": RETRY_AFTER_MINT_S,
+    "marketplace_rate_limited": RETRY_AFTER_MINT_S,
+    "marketplace_error": RETRY_AFTER_FETCH_S,
+    "marketplace_silent": RETRY_AFTER_MINT_S,
+    # Дрейф разметки повтором не лечится вовсе: нужен пиннинг человеком.
+    # Отдаём максимум, который у нас есть, честно понимая, что это условность.
+    "layout_changed": RETRY_AFTER_MINT_S,
+    "needs_render": RETRY_AFTER_MINT_S,
 }
 
 

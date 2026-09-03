@@ -312,3 +312,60 @@ def test_unknown_query_param_is_treated_as_significant_only_if_it_selects_an_off
     c = canonicalise("www.wildberries.ru", "/catalog/12345678/detail.aspx", "size=42", m)
     assert c.offer == ()
     assert c.cache_key.endswith("@*")
+
+
+def test_two_spellings_of_one_offer_share_a_cache_key() -> None:
+    """ЗАМЕР: один оффер Я.Маркета приходит под двумя именами параметра.
+
+    Ссылка из веба несёт ``do-waremd5=ltFbBw03nQpBJdp8oMaPTA``, а раскрутка
+    короткой ссылки ``/cc/`` отдаёт ``offerid=`` с ТЕМ ЖЕ значением. Без
+    приведения к одному имени это два ключа на один оффер: попадания в кэш
+    теряются, и по ключу нельзя понять, что продавец тот же.
+    """
+    path = "/card/da-khun-pao/101814267477"
+    m = match_path("market.yandex.ru", path)
+    web = canonicalise("market.yandex.ru", path, "do-waremd5=ltFbBw03nQpBJdp8oMaPTA", m)
+    short = canonicalise("market.yandex.ru", path, "offerid=ltFbBw03nQpBJdp8oMaPTA", m)
+    assert web.cache_key == short.cache_key
+    assert web.offer == short.offer == (("offerid", "ltFbBw03nQpBJdp8oMaPTA"),)
+
+
+def test_different_offers_still_get_different_keys_after_aliasing() -> None:
+    """Приведение синонимов не должно склеивать РАЗНЫЕ офферы."""
+    path = "/card/da-khun-pao/101814267477"
+    m = match_path("market.yandex.ru", path)
+    a = canonicalise("market.yandex.ru", path, "offerid=AAA", m)
+    b = canonicalise("market.yandex.ru", path, "do-waremd5=BBB", m)
+    assert a.cache_key != b.cache_key
+
+
+def test_both_spellings_at_once_collapse_to_one_entry() -> None:
+    """ЗАМЕР: раскрученный URL Я.Маркета иногда несёт оба написания сразу.
+
+    Без дедупликации алиас давал ключ вида ``@offerid=X&offerid=X`` —
+    уникальный, ни с чем не совпадающий и потому гарантирующий промах кэша.
+    """
+    path = "/card/da-khun-pao/101814267477"
+    m = match_path("market.yandex.ru", path)
+    c = canonicalise(
+        "market.yandex.ru",
+        path,
+        "offerid=ltFbBw03nQpBJdp8oMaPTA&do-waremd5=ltFbBw03nQpBJdp8oMaPTA&sponsored=1",
+        m,
+    )
+    assert c.offer == (("offerid", "ltFbBw03nQpBJdp8oMaPTA"),)
+    assert c.cache_key.count("offerid") == 1
+
+    # И совпадает с ключом каждого написания по отдельности.
+    only_web = canonicalise("market.yandex.ru", path, "do-waremd5=ltFbBw03nQpBJdp8oMaPTA", m)
+    assert c.cache_key == only_web.cache_key
+
+
+def test_a_value_conflict_resolves_deterministically() -> None:
+    """При разных значениях ключ не должен зависеть от порядка в чужом URL."""
+    path = "/card/x/101814267477"
+    m = match_path("market.yandex.ru", path)
+    a = canonicalise("market.yandex.ru", path, "offerid=AAA&do-waremd5=BBB", m)
+    b = canonicalise("market.yandex.ru", path, "offerid=AAA&do-waremd5=BBB", m)
+    assert a.cache_key == b.cache_key
+    assert len(a.offer) == 1

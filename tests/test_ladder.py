@@ -158,3 +158,18 @@ async def test_ozon_ladder_has_two_rungs_at_full_budget() -> None:
     p = plan(15000, "ozon", 0)
     assert [r.name for r in p.rungs] == ["ozon.composer_replay", "ozon.pdp_html_replay"]
     assert "ozon.seller_widget" not in [r.name for r in p.rungs]
+
+
+async def test_a_rung_appears_in_the_ledger_exactly_once() -> None:
+    """Вложенная стадия с тем же именем удваивала время.
+
+    Замер по живой карточке WB дал [('wb.card_detail', 561),
+    ('wb.card_detail', 562)] вместо одной строки: run_ladder открывал стадию,
+    и клиент открывал вторую внутри. Функционально безобидно, но постмортем и
+    любой p99 из леджера после такого врут.
+    """
+    ex = Scripted(**{"ym.pdp_html": good()})
+    dl = Deadline.start(14600, "t")
+    await run_ladder(dl, ex, CTX, 15000, 0)
+    names = [n for n, _ in dl.spent]
+    assert names.count("ym.pdp_html") == 1, names

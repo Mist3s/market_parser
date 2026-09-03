@@ -26,6 +26,13 @@ from mktlink.store.cache import ProductCache
 from mktlink.timing.deadline import Deadline, DeadlineExceeded
 from mktlink.urls.canonical import Canonical
 
+#: Маркетплейсы, где cookie — ПРЕДУСЛОВИЕ, а не обогащение.
+#:
+#: Только Ozon: его composer-api без cookie не отвечает вовсе (замер: 307
+#: с рукопожатием, затем 403). У WB cookie не нужны, у Я.Маркета лёгкий jar
+#: ничего не меняет — замерено, капча приходит одинаково с ним и без.
+JAR_REQUIRED: frozenset[str] = frozenset({"ozon"})
+
 
 @dataclass(slots=True)
 class PoolView:
@@ -68,9 +75,15 @@ def build_ladder(conn: sqlite3.Connection, client: EgressClient):
             return Extraction(verdict=Verdict.SILENT_EMPTY, reason="no_warm_jar")
 
         lease.jar = jars.get(c.marketplace, lease.proxy_id)
-        if lease.jar is None and c.marketplace != "wb":
-            # WB не требует cookie; Ozon и Я.Маркет — требуют.
+        if lease.jar is None and c.marketplace in JAR_REQUIRED:
+            # Предусловие, а не обогащение: без cookie composer-api Ozon не
+            # отвечает вовсе, и пробовать нечего.
             return Extraction(verdict=Verdict.SILENT_EMPTY, reason="no_warm_jar")
+        # Для остальных jar — обогащение. Пробуем и без него: иначе вердикт
+        # «нет тёплой сессии» подменял бы настоящую причину отказа.
+        # ЗАМЕР 2026-09-03: карточка Я.Маркета отдаёт 302 на /showcaptcha
+        # одинаково с cookie и без, поэтому требовать jar значило бы
+        # сообщать клиенту не ту причину.
 
         slot = reserve_slot(conn, c.marketplace, lease.proxy_id)
         try:

@@ -145,3 +145,28 @@ def test_the_hot_path_cannot_buy_or_prolong(conn) -> None:
     assert hasattr(view, "lease")
     for forbidden in ("buy", "prolong", "condemn", "delete"):
         assert not hasattr(view, forbidden), forbidden
+
+
+async def test_only_ozon_treats_a_jar_as_a_precondition(conn) -> None:
+    """Требовать jar там, где он ничего не меняет, значит врать о причине.
+
+    ЗАМЕР: карточка Я.Маркета отдаёт 302 на /showcaptcha одинаково с cookie и
+    без, поэтому ответ «нет тёплой сессии» подменял бы настоящую причину —
+    капчу. У Ozon же composer-api без cookie не отвечает вовсе, и там это
+    настоящее предусловие.
+    """
+    from mktlink.api.wiring import JAR_REQUIRED
+
+    assert JAR_REQUIRED == frozenset({"ozon"})
+
+    tried: list[str] = []
+
+    async def watching(url, *, headers, proxy, impersonate, timeout_ms):
+        tried.append(url)
+        return 302, ""
+
+    deps = Deps(cache=ProductCache(conn), ladder=build_ladder(conn, EgressClient(watching)))
+    code, r = await handle(ProductRequest(url=YM_PDP), deps)
+    assert tried, "Я.Маркет обязан быть попробован без jar"
+    assert r.meta.reason != "no_warm_jar", "иначе клиенту сообщается не та причина"
+    assert r.meta.reason == "marketplace_silent", r.meta.reason

@@ -19,6 +19,28 @@ from urllib.parse import parse_qsl, urlencode
 
 from mktlink.urls.registry import Match, offer_params
 
+#: Синонимы параметров выбора оффера, приводимые к одному имени.
+#:
+#: ЗАМЕР 2026-09-03: одна и та же карточка Я.Маркета приходит с
+#: ``?do-waremd5=ltFbBw03nQpBJdp8oMaPTA`` (ссылка из веба) и с
+#: ``?offerid=ltFbBw03nQpBJdp8oMaPTA`` (результат раскрутки короткой ссылки
+#: ``/cc/``) — ЗНАЧЕНИЕ ОДНО И ТО ЖЕ. Без приведения это два ключа кэша на
+#: один оффер: попадания теряются, и, что хуже, по ключу нельзя понять, что
+#: речь об одном и том же продавце.
+#:
+#: Приводим к ``offerid``, потому что так называет его сам Я.Маркет в URL,
+#: который отдаёт раскрутка.
+#:
+#: **И приведение обязано дедуплицировать.** Замечено на той же ссылке: URL,
+#: который отдаёт раскрутка, МЕНЯЕТСЯ между запросами и иногда несёт оба
+#: написания сразу. Без дедупликации алиас превращал их в две одинаковые
+#: записи, и ключ кэша получался вида
+#: ``@offerid=X&offerid=X`` — уникальный, ни с чем не совпадающий и потому
+#: гарантирующий промах.
+OFFER_ALIASES: dict[str, dict[str, str]] = {
+    "ym": {"do-waremd5": "offerid"},
+}
+
 #: Трекинговый шум. Список закрытый: неизвестный параметр считается значимым
 #: и остаётся, потому что цена ошибки асимметрична — потерять выбор оффера
 #: хуже, чем продублировать запись кэша.
@@ -101,13 +123,18 @@ def _is_noise(name: str) -> bool:
 def canonicalise(host: str, path: str, query: str, m: Match) -> Canonical:
     """Собрать канонический URL и ключ кэша."""
     keep = offer_params(m.marketplace)
-    offer = tuple(
-        sorted(
-            (k, v)
-            for k, v in parse_qsl(query, keep_blank_values=False)
-            if k.lower() in keep and not _is_noise(k)
-        )
-    )
+    aliases = OFFER_ALIASES.get(m.marketplace, {})
+    # Словарь, а не список: после приведения синонимов одинаковые записи
+    # обязаны склеиться в одну. Первое вхождение выигрывает — при конфликте
+    # значений это даёт детерминированный ключ, а не зависящий от порядка
+    # параметров в чужом URL.
+    collected: dict[str, str] = {}
+    for k, v in parse_qsl(query, keep_blank_values=False):
+        low = k.lower()
+        if low not in keep or _is_noise(k):
+            continue
+        collected.setdefault(aliases.get(low, low), v)
+    offer = tuple(sorted(collected.items()))
     # Хост нормализуется к www-форме владельца: ozon.ru и www.ozon.ru — одна
     # и та же карточка, и держать два ключа кэша на неё незачем.
     canon_host = _canonical_host(host)

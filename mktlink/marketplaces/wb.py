@@ -12,6 +12,13 @@
   телом** — его не существует. Живой эндпоинт — ``cards/v4/detail``
   (HTTP 200). Гипотеза была неверной, и метка ``[гипотеза]`` стояла ровно
   для этого случая.
+* **Форма конверта у v4 другая, и это второй замер того же дня.** Товары
+  лежат в КОРНЕ: ``payload["products"]``, а не ``payload["data"]["products"]``,
+  как было у каталожного ответа в скрейпере. Обёртки ``data`` в v4 нет вовсе.
+  Разбор принимает обе формы: корневую как основную, вложенную как наследие.
+* ``supplier``, ``supplierId`` и вдобавок ``supplierRating`` в ответе v4
+  **есть** — проверено на живой карточке. Продавец на WB действительно
+  достаётся бесплатно, без cookie и без браузера.
 * ``dest=-1257786`` и ``spp=30`` — **[репо]**, ``_catalog_params``. ``dest``
   задаёт регион и меняет цену с наличием, поэтому дрейфовать ему нельзя.
 * ``supplierId`` — **[гипотеза]**: в репозиторных полях отсутствует.
@@ -91,9 +98,7 @@ def parse_card(payload: Any, sel: SelectorMap, *, nm: str) -> RungResult:
     seller = classify(
         "wb",
         seller_value,
-        make_source("wb", "state", ("data", "products", "0", *used_path))
-        if seller_value
-        else None,
+        make_source("wb", "state", ("products", "0", *used_path)) if seller_value else None,
         {"supplierId": item.get("supplierId")},
     )
 
@@ -124,12 +129,18 @@ def price_kopecks(item: dict[str, Any]) -> int | None:
 
 
 def _products(payload: Any) -> list[dict[str, Any]]:
+    """Товары из ответа. Принимаем обе наблюдённые формы конверта.
+
+    v4 кладёт список в корень; каталожный ответ, который видел скрейпер,
+    прятал его под ``data``. Порядок значим: корневая форма — основная,
+    вложенная оставлена наследием, чтобы старый ответ не читался как пустой.
+    """
     if not isinstance(payload, dict):
         return []
-    data = payload.get("data")
-    if not isinstance(data, dict):
-        return []
-    items = data.get("products")
+    items = payload.get("products")
+    if not isinstance(items, list):
+        data = payload.get("data")
+        items = data.get("products") if isinstance(data, dict) else None
     return [i for i in items if isinstance(i, dict)] if isinstance(items, list) else []
 
 
@@ -148,7 +159,11 @@ def classify_response(payload: Any, status: int = 200) -> Verdict | None:
         return Verdict.HTTP_429
     if status >= 500:
         return Verdict.UPSTREAM_ERROR
-    if not isinstance(payload, dict) or "data" not in payload:
+    if not isinstance(payload, dict):
+        return Verdict.SILENT_EMPTY
+    # Конверт валиден, если список товаров есть В ЛЮБОЙ из двух форм. Пустой
+    # список — не дело конверта: это решает разбор.
+    if "products" not in payload and "data" not in payload:
         return Verdict.SILENT_EMPTY
     return None
 

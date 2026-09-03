@@ -24,7 +24,7 @@ from typing import Any, Protocol
 
 from mktlink.egress.fingerprint import PROFILES, replay_headers
 from mktlink.egress.jars import Jar
-from mktlink.timing.deadline import Deadline, stage
+from mktlink.timing.deadline import Deadline, DeadlineExceeded, stage
 
 #: Потолки тела. Больше не читаем: карточка столько не весит, а zip-бомба
 #: весит сколько угодно.
@@ -76,24 +76,39 @@ class EgressClient:
         reserve_ms: int,
         jar: Jar | None = None,
         proxy_url: str | None = None,
-        stage_name: str = "fetch",
+        stage_name: str | None = "fetch",
         max_bytes: int = MAX_HTML_BYTES,
     ) -> Response:
-        """Один запрос внутри стадии бюджета."""
+        """Один запрос внутри стадии бюджета.
+
+        ``stage_name=None`` означает, что стадию УЖЕ открыл вызывающий, и
+        открывать вторую нельзя. Вложенная стадия с тем же именем пишется в
+        леджер дважды и удваивает время: замер по живой карточке WB показал
+        ``[('wb.card_detail', 561), ('wb.card_detail', 562)]`` вместо одной
+        строки. Функционально это безобидно — внутренний срез всё равно
+        считается от остатка, — но постмортем и любой p99, выведенный из
+        леджера, после такого врут.
+        """
         profile = PROFILES[marketplace]
         headers = replay_headers(profile, jar.user_agent if jar else _fallback_ua(profile))
         if jar is not None:
             headers["Cookie"] = jar.cookie_header
         egress = "proxy" if proxy_url else "direct"
 
-        async with stage(dl, stage_name, cap_ms=cap_ms, reserve_ms=reserve_ms) as ms:
+        if stage_name is None:
+            ms = dl.slice_ms(cap_ms, reserve_ms)
+            if ms <= 0:
+                raise DeadlineExceeded("fetch")
             status, body = await self._send(
-                url,
-                headers=headers,
-                proxy=proxy_url,
-                impersonate=profile.impersonate,
-                timeout_ms=ms,
+                url, headers=headers, proxy=proxy_url,
+                impersonate=profile.impersonate, timeout_ms=ms,
             )
+        else:
+            async with stage(dl, stage_name, cap_ms=cap_ms, reserve_ms=reserve_ms) as ms:
+                status, body = await self._send(
+                    url, headers=headers, proxy=proxy_url,
+                    impersonate=profile.impersonate, timeout_ms=ms,
+                )
         if len(body) > max_bytes:
             raise BodyTooLarge(f"{len(body)} > {max_bytes}")
         return Response(status=status, body=body, egress=egress)

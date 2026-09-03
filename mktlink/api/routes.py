@@ -193,8 +193,31 @@ async def _run(
             return 200, resp
 
     return _pending(
-        rid, req.url, c, hops, budget, dl, reason=ex.reason or "no_warm_jar", verdict=ex.verdict
+        rid, req.url, c, hops, budget, dl, reason=_reason_for(ex), verdict=ex.verdict
     )
+
+
+#: Причина отказа, выведенная из вердикта. Дефолта «no_warm_jar» здесь быть
+#: не может: лестница, отработавшая все ступени и получившая капчу, сообщала
+#: бы клиенту «нет тёплой сессии» — то есть неверную причину, из-за которой он
+#: стал бы ждать и повторять вместо того, чтобы узнать про блок.
+_REASON_BY_VERDICT: dict[Verdict, str] = {
+    Verdict.CAPTCHA: "marketplace_challenge",
+    Verdict.HTTP_429: "marketplace_rate_limited",
+    Verdict.UPSTREAM_ERROR: "marketplace_error",
+    Verdict.SILENT_EMPTY: "marketplace_silent",
+    Verdict.SCHEMA_DRIFT: "layout_changed",
+    Verdict.CLIENT_RENDERED: "needs_render",
+    Verdict.BUDGET_EXHAUSTED: "deadline_exhausted",
+    Verdict.UNWIND_CHALLENGED: "unwind_challenged",
+}
+
+
+def _reason_for(ex: Extraction) -> str:
+    """Явная причина от ступени важнее выведенной из вердикта."""
+    if ex.reason:
+        return ex.reason
+    return _REASON_BY_VERDICT.get(ex.verdict, "unavailable")
 
 
 # --- сборка ответов -----------------------------------------------------------
