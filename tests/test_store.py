@@ -337,3 +337,13 @@ def test_a_connection_survives_use_from_another_thread(tmp_path) -> None:
     t.join()
     c.close()
     assert result == [1], result
+
+
+def test_connect_creates_the_directory_it_needs(tmp_path) -> None:
+    """Иначе первый же запуск до init-db падает с невнятной ошибкой SQLite."""
+    nested = tmp_path / "does" / "not" / "exist" / "m.sqlite"
+    c = db_connect(nested)
+    try:
+        assert nested.parent.is_dir()
+    finally:
+        c.close()

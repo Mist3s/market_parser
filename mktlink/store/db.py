@@ -58,6 +58,11 @@ def connect(path: str | Path, *, read_only: bool = False) -> sqlite3.Connection:
             f"(threadsafety={sqlite3.threadsafety}); cross-thread use is unsafe"
         )
     target = str(path)
+    if not read_only:
+        # Каталог создаём здесь, а не только в init_db: иначе любой путь,
+        # идущий до инициализации, падает с невнятным «unable to open
+        # database file» вместо понятного отказа.
+        Path(target).parent.mkdir(parents=True, exist_ok=True)
     if read_only:
         conn = sqlite3.connect(
             f"file:{target}?mode=ro", uri=True, isolation_level=None, check_same_thread=False

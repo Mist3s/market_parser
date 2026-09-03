@@ -175,3 +175,18 @@ def _seed(conn, descr: str = "mp1.mp.s.a.R.ru.g01") -> None:
         " VALUES (11, '1.2.3.4', 'h', 8000, 'u', 'p', 3, ?, 'active', unixepoch() + 86400)",
         (descr,),
     )
+
+
+async def test_the_local_descr_is_synced_after_the_class_tag_is_written(conn) -> None:
+    """Иначе veto читает пустой descr и теряет только что купленный адрес.
+
+    Пустая строка не разбирается грамматикой, планировщик трактует её как
+    непродлеваемую — и прокси, за который мы заплатили минуту назад, не
+    продлевается никогда.
+    """
+    fake = Fake(getprice={"status": "yes", "price": "7.70"}, buy=BOUGHT)
+    res = await applier(conn, fake).apply([Command(Op.BUY, version=3, period_days=7)])
+    assert res[0].ok
+    row = conn.execute("SELECT descr FROM proxy WHERE p6_id = 11").fetchone()
+    assert unpack(row["descr"]).renew == "R", f"локальный descr: {row['descr']!r}"
+    assert len(row["descr"]) == 19

@@ -92,7 +92,7 @@ class OzonLane(Lane):
         url = ozon.composer_url(ozon.pdp_path(sku))
         r = await self._get(dl, url, cap_ms, name, max_bytes=4 * 1024 * 1024)
         payload = _json(r.body)
-        verdict = ozon.classify_response(r.body, payload)
+        verdict = ozon.classify_response(r.body, payload, r.status)
         if verdict is not None:
             return RungResult(verdict=verdict)
         return ozon.parse_pdp(payload, self._sel.get("ozon"), sku=sku)
@@ -101,6 +101,9 @@ class OzonLane(Lane):
         # Второй транспорт: та же карточка обычным HTML. Нужен не ради
         # дублирования, а потому что composer и HTML ломаются по-разному.
         r = await self._get(dl, ctx.canonical_url, cap_ms, name, max_bytes=2 * 1024 * 1024)
+        blocked = ozon.classify_response(r.body, None, r.status)
+        if blocked in (Verdict.CAPTCHA, Verdict.HTTP_429, Verdict.UPSTREAM_ERROR):
+            return RungResult(verdict=blocked)
         if len(r.body) < ozon.MIN_PAYLOAD_BYTES:
             return RungResult(verdict=Verdict.SILENT_EMPTY)
         title = _og_title(r.body)
@@ -128,7 +131,7 @@ class WbLane(Lane):
         nm = ctx.ids.get("nm") or ""
         r = await self._get(dl, wb.card_url(nm), cap_ms, name, max_bytes=4 * 1024 * 1024)
         payload = _json(r.body)
-        verdict = wb.classify_response(payload)
+        verdict = wb.classify_response(payload, r.status)
         if verdict is not None:
             return RungResult(verdict=verdict)
         return wb.parse_card(payload, self._sel.get("wb"), nm=nm)
@@ -136,6 +139,9 @@ class WbLane(Lane):
     async def _pdp_html(self, dl, ctx, cap_ms, prev, name):
         nm = ctx.ids.get("nm") or ""
         r = await self._get(dl, wb.pdp_url(nm), cap_ms, name, max_bytes=2 * 1024 * 1024)
+        blocked = wb.classify_response(None, r.status)
+        if blocked in (Verdict.CAPTCHA, Verdict.HTTP_429, Verdict.UPSTREAM_ERROR):
+            return RungResult(verdict=blocked)
         if not r.body:
             return RungResult(verdict=Verdict.SILENT_EMPTY)
         title = _og_title(r.body)
@@ -161,14 +167,18 @@ class YmLane(Lane):
     async def _pdp_html(self, dl, ctx, cap_ms, prev, name):
         path = ctx.canonical_url.split("market.yandex.ru", 1)[-1]
         r = await self._get(dl, ym.fetch_url(path), cap_ms, name, max_bytes=2 * 1024 * 1024)
-        return ym.parse_pdp(r.body, self._sel.get("ym"), anchor_ids=set(ctx.anchor_ids))
+        return ym.parse_pdp(
+            r.body, self._sel.get("ym"), anchor_ids=set(ctx.anchor_ids), status=r.status
+        )
 
     async def _offers_page(self, dl, ctx, cap_ms, prev, name):
         pid = ctx.ids.get("product_id") or ctx.ids.get("sku_id") or ""
         r = await self._get(
             dl, ym.fetch_url(f"/product--x/{pid}/offers"), cap_ms, name, max_bytes=2 * 1024 * 1024
         )
-        return ym.parse_pdp(r.body, self._sel.get("ym"), anchor_ids=set(ctx.anchor_ids))
+        return ym.parse_pdp(
+            r.body, self._sel.get("ym"), anchor_ids=set(ctx.anchor_ids), status=r.status
+        )
 
     async def _pdp_html_retry(self, dl, ctx, cap_ms, prev, name):
         # Второй транспорт для корроборации. Тот же URL, но смысл в том, что

@@ -86,7 +86,7 @@ def identity(html: str) -> str | None:
     return None
 
 
-def classify_response(html: str, *, anchor_ids: set[str]) -> Verdict | None:
+def classify_response(html: str, *, anchor_ids: set[str], status: int = 200) -> Verdict | None:
     """Вердикт по форме ответа. ``None`` — разбирать дальше.
 
     Порядок проверок инвертирован против репозиторного ``ensure_not_blocked``:
@@ -95,6 +95,15 @@ def classify_response(html: str, *, anchor_ids: set[str]) -> Verdict | None:
     то есть проверка не выполнялась НИКОГДА и её нельзя было провалидировать
     тестом. Сперва маркеры, потом положительная идентичность.
     """
+    # Статус решает раньше тела: страница блока может не содержать ни одного
+    # текстового маркера (замерено на Ozon, см. его classify_response).
+    if status in (401, 403):
+        return Verdict.CAPTCHA
+    if status == 429:
+        return Verdict.HTTP_429
+    if status >= 500:
+        return Verdict.UPSTREAM_ERROR
+
     low = html.casefold()
 
     if any(m in low for m in CAPTCHA_MARKERS):
@@ -118,9 +127,11 @@ def classify_response(html: str, *, anchor_ids: set[str]) -> Verdict | None:
     return None
 
 
-def parse_pdp(html: str, sel: SelectorMap, *, anchor_ids: set[str]) -> RungResult:
+def parse_pdp(
+    html: str, sel: SelectorMap, *, anchor_ids: set[str], status: int = 200
+) -> RungResult:
     """Разобрать карточку. Продавец берётся ТОЛЬКО якорным выбором."""
-    verdict = classify_response(html, anchor_ids=anchor_ids)
+    verdict = classify_response(html, anchor_ids=anchor_ids, status=status)
     if verdict is not None:
         return RungResult(verdict=verdict)
 

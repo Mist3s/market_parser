@@ -138,8 +138,13 @@ class Applier:
             self._upsert_proxy(items[0], version)
 
         # Классовый тэг вместо nonce. Единственное место, где рождается 'R'.
-        await self._p6.setdescr(new=pack_birth(version, self._gen), ids=[p6_id])
-        return Applied(cmd, True, f"bought {p6_id}")
+        tag = pack_birth(version, self._gen)
+        await self._p6.setdescr(new=tag, ids=[p6_id])
+        # Локальную строку обязательно синхронизируем: без этого veto
+        # продления читает пустой descr, не разбирает его и трактует адрес как
+        # непродлеваемый — то есть мы теряем только что купленный прокси.
+        self._conn.execute("UPDATE proxy SET descr = ? WHERE p6_id = ?", (tag, p6_id))
+        return Applied(cmd, True, f"bought {p6_id} as {tag}")
 
     async def _prolong(self, cmd: Command) -> Applied:
         assert cmd.p6_id is not None

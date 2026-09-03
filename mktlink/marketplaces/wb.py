@@ -7,9 +7,11 @@
 Что здесь гипотеза, а что нет:
 
 * ``supplier`` в объекте товара — **[репо]**, наблюдается в каталожном ответе.
-* Эндпоинт карточки ``card.wb.ru/cards/v2/detail`` — **[гипотеза]**: в
-  репозитории он не встречается ни разу, там ходят в каталог
-  ``catalog.wb.ru/catalog/product5/v4/catalog``.
+* Эндпоинт карточки — **[ЗАМЕРЕНО 2026-09-03]** через датацентровый IPv4
+  proxy6. Предполагавшийся ``cards/v2/detail`` отвечает **404 с нулевым
+  телом** — его не существует. Живой эндпоинт — ``cards/v4/detail``
+  (HTTP 200). Гипотеза была неверной, и метка ``[гипотеза]`` стояла ровно
+  для этого случая.
 * ``dest=-1257786`` и ``spp=30`` — **[репо]**, ``_catalog_params``. ``dest``
   задаёт регион и меняет цену с наличием, поэтому дрейфовать ему нельзя.
 * ``supplierId`` — **[гипотеза]**: в репозиторных полях отсутствует.
@@ -17,6 +19,13 @@
 Ещё одно наблюдение, которое стоит перенести: WB отдаёт цены в целых
 единицах, кратных копейке, и репозиторный ``wb_units_to_kopecks`` — это
 тождественная функция. Умножать их на сто, как обычные рубли, нельзя.
+
+**И ещё один замер, который дороже остальных.** Репозиторный интервал в 2 с
+(``request_spacing_seconds``) с датацентрового адреса НЕДОСТАТОЧЕН: пять
+запросов, разнесённых на 2 с, дали ``HTTP 429`` с HTML-телом. Значение
+``MIN_INTERVAL_MS["wb"] = 2000`` унаследовано из окружения с другим IP и
+подлежит пересмотру по замеру Phase 0 — это первый кандидат на изменение,
+и до него мы знаем, что оно оптимистично.
 """
 
 from __future__ import annotations
@@ -30,7 +39,8 @@ from mktlink.marketplaces.base import RungResult
 from mktlink.marketplaces.selectors import SelectorMap
 from mktlink.marketplaces.verdict import SellerStatus, Verdict
 
-CARD_API = "https://card.wb.ru/cards/v2/detail"
+#: [ЗАМЕРЕНО] v4, а не v2: v2 отдаёт 404 с нулевым телом.
+CARD_API = "https://card.wb.ru/cards/v4/detail"
 PDP = "https://www.wildberries.ru/catalog/{nm}/detail.aspx"
 
 #: [репо] wildberries.py:262. Регион Москвы. Меняет цену и наличие, поэтому
@@ -130,7 +140,14 @@ def _pick(products: list[dict[str, Any]], nm: str) -> dict[str, Any] | None:
     return None
 
 
-def classify_response(payload: Any) -> Verdict | None:
+def classify_response(payload: Any, status: int = 200) -> Verdict | None:
+    """Статус решает раньше тела — по тем же причинам, что у Ozon."""
+    if status in (401, 403):
+        return Verdict.CAPTCHA
+    if status == 429:
+        return Verdict.HTTP_429
+    if status >= 500:
+        return Verdict.UPSTREAM_ERROR
     if not isinstance(payload, dict) or "data" not in payload:
         return Verdict.SILENT_EMPTY
     return None

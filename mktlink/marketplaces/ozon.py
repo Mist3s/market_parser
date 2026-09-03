@@ -163,11 +163,32 @@ def _neighbours(state: Any) -> dict[str, Any]:
     return out
 
 
-def classify_response(body: bytes | str, payload: Any) -> Verdict | None:
+def classify_response(body: bytes | str, payload: Any, status: int = 200) -> Verdict | None:
     """Вердикт по форме ответа, до разбора содержимого.
+
+    **Статус решает раньше тела, и это исправление по живому замеру.**
+    Прежняя версия смотрела только на тело и на реальном блоке Ozon
+    (HTTP 403, 5 КБ стилизованной страницы) выдавала ``SILENT_EMPTY``.
+    Для здоровья прокси исход тот же — оба вердикта штрафуют, — но диагноз
+    оператору выдавался неверный: «страница пришла пустая» вместо «нас
+    заблокировали». Замерено 2026-09-03 через датацентровый IPv4 proxy6.
+
+    Отдельная тонкость: страница блока Ozon НЕ содержит ни одного
+    антибот-маркера из унаследованного списка. Опираться на текст тела здесь
+    нельзя вовсе — только на статус.
 
     Возвращает ``None``, когда ответ похож на нормальный и разбирать его надо.
     """
+    if status in (401, 403):
+        return Verdict.CAPTCHA
+    if status == 429:
+        return Verdict.HTTP_429
+    if status >= 500:
+        return Verdict.UPSTREAM_ERROR
+    if status in (301, 302, 303, 307, 308):
+        # Рукопожатие за cookie: Ozon отдаёт ``__Secure-ETC`` и отправляет на
+        # тот же URL. Само по себе это не отказ, но данных в таком ответе нет.
+        return Verdict.SILENT_EMPTY
     size = len(body) if isinstance(body, (bytes, str)) else 0
     if size < MIN_PAYLOAD_BYTES:
         return Verdict.SILENT_EMPTY
