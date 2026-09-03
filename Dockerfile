@@ -29,7 +29,7 @@ sys.exit('browser leaked into the api image: %s' % bad) if bad else None"
 # Том для /app/data: там SQLite с never_renew, тратами и jar. Инструкцию
 # VOLUME не используем — часть билдеров её не поддерживает.
 EXPOSE 8000
-CMD ["uvicorn", "mktlink.api.app:create_app", "--factory", \
+CMD ["uvicorn", "mktlink.api.app:factory", "--factory", \
      "--host", "0.0.0.0", "--port", "8000", \
      # 35 > RESPONSE_BUDGET_MAX_MS (30 с): keep-alive не влияет на запрос
      # в полёте, но держать его НИЖЕ потолка ответа — это противоречие в

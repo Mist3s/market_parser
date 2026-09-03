@@ -102,11 +102,25 @@ async def test_ym_with_a_warm_jar_goes_through(conn) -> None:
 
 
 async def test_an_empty_pool_is_pending_not_an_error(conn) -> None:
+    """Пустой пул — это «подожди», а не ошибка. Но только там, где адрес НУЖЕН.
+
+    Проверяется на Я.Маркете, а не на WB, и это не придирка. WB замерен
+    работающим с нашего адреса напрямую (HTTP 200 без cookie и без браузера),
+    поэтому требовать для него покупку значило бы ломать первый запуск: свежая
+    установка отвечала бы `202` на маркетплейсе, которому прокси не нужен —
+    см. ``WORKS_DIRECT``. У Ozon и Я.Маркета адрес действительно необходим:
+    с нашего они замерены как 403 и как капча.
+    """
     conn.execute("DELETE FROM proxy")
     deps = Deps(cache=ProductCache(conn), ladder=build_ladder(conn, EgressClient(
         transport(WB_OK))))
-    code, r = await handle(ProductRequest(url=WB_PDP), deps)
+    code, r = await handle(ProductRequest(url=YM_PDP), deps)
     assert code == 202, "forge купит первый адрес, повтор попадёт в рабочий пул"
+    assert r.meta.reason == "no_warm_jar"
+
+    # А WB на том же пустом пуле обязан ответить, а не ждать покупки.
+    code, r = await handle(ProductRequest(url=WB_PDP), deps)
+    assert code == 200, r.meta.reason
 
 
 async def test_a_silent_block_is_charged_to_the_proxy(conn) -> None:

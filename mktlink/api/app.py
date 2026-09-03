@@ -55,6 +55,47 @@ def _first(exc: Any) -> dict[str, Any]:
     }
 
 
+def factory() -> Any:
+    """Фабрика БЕЗ аргументов — та, которую умеет вызывать ``uvicorn --factory``.
+
+    Существует потому, что документированная команда запуска не работала
+    никогда. И README, и ``Dockerfile`` указывали на ``create_app``, а
+    ``uvicorn --factory`` вызывает фабрику без аргументов::
+
+        ERROR: Error loading ASGI app factory:
+               create_app() missing 1 required positional argument: 'deps'
+
+    То есть сервис не поднимался ни командой из инструкции, ни в контейнере.
+    Нашлось это буквальным прохождением собственной инструкции — код, который
+    никто не запускал документированным способом, документированным способом
+    и не запускается.
+
+    ``create_app`` остаётся принимающим зависимости: на нём стоят все тесты
+    пути запроса, и именно инъекция позволяет проверять его без сети, без
+    браузера и без proxy6.
+
+    **Про авторизацию.** Она включается сама, когда в таблице ``api_key``
+    появляется хотя бы один ключ, и не включается, пока их нет. Иначе выбор
+    был бы между двумя плохими: либо свежая установка отвечает ``401`` на
+    любой запрос (и первый запуск невозможен), либо квоты не действуют, пока
+    кто-то не вспомнит про отдельный флаг. Проверка по факту наличия ключей
+    делает включение наблюдаемым: добавили ключ — доступ закрылся.
+    """
+    from mktlink.api.wiring import build_deps  # noqa: PLC0415
+
+    cfg = Settings()
+    deps = build_deps(cfg)
+    admission = None
+    conn = getattr(deps.cache, "_conn", None)
+    if conn is not None:
+        from mktlink.api.apikey import Admission  # noqa: PLC0415
+
+        keys = conn.execute("SELECT count(*) AS n FROM api_key").fetchone()
+        if keys is not None and int(keys["n"]) > 0:
+            admission = Admission(conn)
+    return create_app(deps, cfg, admission)
+
+
 def create_app(
     deps: Deps,
     settings: Settings | None = None,
