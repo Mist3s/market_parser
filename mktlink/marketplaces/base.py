@@ -71,6 +71,10 @@ class Context:
     offer: tuple[tuple[str, str], ...] = ()
     #: Идентификаторы, к которым обязан быть привязан продавец.
     anchor_ids: frozenset[str] = frozenset()
+    #: Запрос идёт через скрейпинг-API, а не через наш адрес. Влияет на
+    #: выбор лестницы: у API другая цена ступени и другое время ответа,
+    #: поэтому расписывать бюджет по числам собственного егресса нельзя.
+    via_api: bool = False
 
 
 class Extractor(Protocol):
@@ -115,7 +119,7 @@ async def run_ladder(
     hops: int,
 ) -> tuple[RungResult, str | None]:
     """Пройти лестницу. Возвращает слитый результат и имя последней ступени."""
-    p: Plan = plan(budget_ms, ctx.marketplace, hops)
+    p: Plan = plan(budget_ms, ctx.marketplace, hops, via_api=ctx.via_api)
     reserve = stage_reserve_ms(ctx.marketplace)
     best: RungResult | None = None
     last: str | None = None

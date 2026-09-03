@@ -93,7 +93,7 @@ class EgressClient:
         headers = replay_headers(profile, jar.user_agent if jar else _fallback_ua(profile))
         if jar is not None:
             headers["Cookie"] = jar.cookie_header
-        egress = "proxy" if proxy_url else "direct"
+        egress = self.egress_kind(proxy_url)
 
         if stage_name is None:
             ms = dl.slice_ms(cap_ms, reserve_ms)
@@ -112,6 +112,21 @@ class EgressClient:
         if len(body) > max_bytes:
             raise BodyTooLarge(f"{len(body)} > {max_bytes}")
         return Response(status=status, body=body, egress=egress)
+
+    def egress_kind(self, proxy_url: str | None) -> str:
+        """Через что сделано наблюдение. Решает транспорт, если он это знает.
+
+        Правило «есть proxy_url — значит proxy» верно ровно для двух
+        транспортов: своего сокета напрямую и своего сокета через свой прокси.
+        Скрейпинг-API не подходит ни туда, ни туда: адрес не наш, и его отказ
+        не улика против нашего IPv4 — а именно по этой улике адрес потом
+        заменяют за деньги. Поэтому транспорт вправе назвать свой вид сам,
+        объявив ``egress_kind``; молчащий транспорт трактуется по-старому.
+        """
+        kind = getattr(self._transport, "egress_kind", None)
+        if isinstance(kind, str) and kind:
+            return kind
+        return "proxy" if proxy_url else "direct"
 
     async def _send(self, url: str, **kw: Any) -> tuple[int, str]:
         if self._transport is not None:

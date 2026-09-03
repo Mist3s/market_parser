@@ -33,7 +33,7 @@ def conn(tmp_path):
     c.close()
 
 
-def test_schema_creates_eighteen_tables(conn) -> None:
+def test_schema_creates_nineteen_tables(conn) -> None:
     rows = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
     ).fetchall()
@@ -46,6 +46,7 @@ def test_schema_creates_eighteen_tables(conn) -> None:
             "key_usage",
             "marketplace_policy",
             "never_prolong",
+            "outbound_shortlink",
             "product",
             "proxy",
             "proxy_attempt",
@@ -60,7 +61,7 @@ def test_schema_creates_eighteen_tables(conn) -> None:
             "request_log",
         ]
     )
-    assert len(names) == 18
+    assert len(names) == 19
 
 
 def test_init_db_is_idempotent(tmp_path) -> None:

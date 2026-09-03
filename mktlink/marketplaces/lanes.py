@@ -104,20 +104,27 @@ class OzonLane(Lane):
         return ozon.parse_pdp(payload, self._sel.get("ozon"), sku=sku)
 
     async def _pdp_html_replay(self, dl, ctx, cap_ms, prev, name):
-        # Второй транспорт: та же карточка обычным HTML. Нужен не ради
-        # дублирования, а потому что composer и HTML ломаются по-разному.
+        """Карточка как отрендеренный HTML.
+
+        Ступень существовала и раньше, но извлекала ТОЛЬКО название из
+        ``og:title`` и всегда возвращала ``PARTIAL`` — продавца она не искала
+        вовсе. По замеру 2026-09-03 это была потеря на пустом месте: на
+        отрендеренной странице продавец лежит рядом с названием и привязан
+        двумя якорями. Разбор перенесён в :func:`ozon.parse_pdp_html`, где его
+        можно проверить фикстурой живой страницы.
+        """
         r = await self._get(dl, ctx.canonical_url, cap_ms, name, max_bytes=2 * 1024 * 1024)
-        blocked = ozon.classify_response(r.body, None, r.status)
-        if blocked in (Verdict.CAPTCHA, Verdict.HTTP_429, Verdict.UPSTREAM_ERROR):
-            return RungResult(verdict=blocked)
-        if len(r.body) < ozon.MIN_PAYLOAD_BYTES:
-            return RungResult(verdict=Verdict.SILENT_EMPTY)
-        title = _og_title(r.body)
-        if title is None:
-            # Тело есть, а заголовка в нём нет: разметка поехала, но адрес
-            # отработал. Это дрейф, и штрафовать за него нельзя.
-            return RungResult(verdict=Verdict.SCHEMA_DRIFT)
-        return RungResult(verdict=Verdict.PARTIAL, name=title)
+        return ozon.parse_pdp_html(r.body, anchor_ids=set(ctx.anchor_ids), status=r.status)
+
+    async def _api_html(self, dl, ctx, cap_ms, prev, name):
+        """Единственная ступень API-лестницы: карточка целиком, один кредит.
+
+        Тот же разбор, что у ``_pdp_html_replay``, — но отдельная ступень,
+        потому что у неё другой пол и потолок (замер: 9–25 с против 1.8 с) и
+        другая цена (35 кредитов поставщика против нуля).
+        """
+        r = await self._get(dl, ctx.canonical_url, cap_ms, name, max_bytes=4 * 1024 * 1024)
+        return ozon.parse_pdp_html(r.body, anchor_ids=set(ctx.anchor_ids), status=r.status)
 
     async def _seller_widget(self, dl, ctx, cap_ms, prev, name):
         sku = ctx.ids.get("sku") or ""
@@ -177,6 +184,22 @@ class YmLane(Lane):
             r.body, self._sel.get("ym"), anchor_ids=set(ctx.anchor_ids), status=r.status
         )
 
+    async def _api_html(self, dl, ctx, cap_ms, prev, name):
+        """Карточка через скрейпинг-API. Рендеринг ЗАПРЕЩЁН на стороне API.
+
+        Причина в :data:`mktlink.egress.scrapedo.PARAMS`: с рендерингом Яндекс
+        отдаёт капчу (14 768 байт, пять маркеров), без него — полную
+        SSR-оболочку с названием и продавцом (703 533 байта). Здесь же и
+        причина, по которой сокращать ссылку Я.Маркета нельзя.
+
+        Регион не форсируется: ``lr=213`` уводил бы запрос на другой URL, а
+        гео выбирает поставщик параметром ``geoCode=ru``.
+        """
+        r = await self._get(dl, ctx.canonical_url, cap_ms, name, max_bytes=4 * 1024 * 1024)
+        return ym.parse_pdp(
+            r.body, self._sel.get("ym"), anchor_ids=set(ctx.anchor_ids), status=r.status
+        )
+
     async def _offers_page(self, dl, ctx, cap_ms, prev, name):
         pid = ctx.ids.get("product_id") or ctx.ids.get("sku_id") or ""
         r = await self._get(
@@ -217,23 +240,19 @@ def _json(body: str) -> Any:
         return None
 
 
-_OG_TITLE = None
-
-
 def _og_title(html: str) -> str | None:
-    global _OG_TITLE
-    if _OG_TITLE is None:
-        import re  # noqa: PLC0415
+    """Название из ``og:title``.
 
-        _OG_TITLE = re.compile(
-            r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)', re.I
-        )
-    m = _OG_TITLE.search(html)
-    if not m:
-        return None
+    Своей регулярки здесь больше нет: она предполагала порядок атрибутов
+    ``property`` → ``content`` и на Яндексе не совпадала никогда (см.
+    :mod:`mktlink.extract.htmlmeta`). Чтение — общее для всех лейнов, потому
+    что ошибка была общей.
+    """
+    from mktlink.extract.htmlmeta import meta_content  # noqa: PLC0415
     from mktlink.extract.normalize import normalize_text  # noqa: PLC0415
 
-    return normalize_text(m.group(1)) or None
+    og = meta_content(html, "og:title")
+    return (normalize_text(og) or None) if og else None
 
 
 _LEGAL = None

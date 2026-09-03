@@ -345,6 +345,14 @@ def _ok_from(
             # Имя отдаётся ТОЛЬКО при разрешённом статусе. При любом другом
             # это null, и никогда не бренд и не имя маркетплейса.
             name=body.get("seller_name") if resolved else None,
+            # Найденный, но не привязанный к офферу продавец. Уходит в
+            # отдельное поле, чтобы наивное чтение ``name`` не могло записать
+            # продавца чужого оффера — см. докстроку SellerBlock.
+            unverified_name=(
+                body.get("seller_name")
+                if status == str(SellerStatus.CARD_DEFAULT)
+                else None
+            ),
             id=body.get("seller_id"),
             legal_name=body.get("legal_name"),
             kind=(

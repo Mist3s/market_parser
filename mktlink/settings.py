@@ -49,6 +49,27 @@ class Settings(BaseSettings):
     #: неудачная покупка должна дёшево истечь, а не висеть оплаченной месяц.
     proxy6_period_days: int = Field(default=7, ge=1, le=90)
 
+    # --- scrape.do ------------------------------------------------------------
+    #: Ключ скрейпинг-API. Появился по замеру 2026-09-03: с нашего егресса
+    #: (датацентр в Финляндии) Ozon и Я.Маркет недостижимы В ПРИНЦИПЕ, а через
+    #: этот API с ``geoCode=ru&super=true`` отдаются целиком. То есть он не
+    #: ускорение, а единственный проверенный способ дотянуться до двух
+    #: маркетплейсов из трёх.
+    scrapedo_token: str | None = None
+
+    #: Какие маркетплейсы идут через API. WB здесь НЕТ намеренно: он работает
+    #: напрямую за 7.70 ₽/мес, и гнать его через платные кредиты — выброшенные
+    #: деньги при худшем времени ответа.
+    scrapedo_marketplaces: tuple[str, ...] = ("ozon", "ym")
+
+    #: Сокращать ли целевую ссылку. ``"none"`` — прямой URL, легальный путь,
+    #: требует платного тарифа поставщика. ``"clck"``/``"goo"`` — обход
+    #: тарифного гейта на бесплатном тарифе; почему это временно и чем
+    #: рискует, подробно написано в докстроке
+    #: :mod:`mktlink.egress.shortener`. Дефолт — легальный путь: обход
+    #: включается явным решением, а не по забывчивости.
+    scrapedo_shorten_via: str = "none"
+
     # --- маркетплейсы --------------------------------------------------------
     #: Регион Я.Маркета форсируется на исходящем (lr=213), поэтому в ключ кэша
     #: не входит. Если Phase 0 покажет, что Яндекс параметр игнорирует, регион
@@ -76,6 +97,23 @@ class Settings(BaseSettings):
 
         return self.response_budget_ms + CLIENT_TIMEOUT_MARGIN_MS
 
+    @field_validator("scrapedo_shorten_via")
+    @classmethod
+    def _known_shortener(cls, v: str) -> str:
+        from mktlink.egress.shortener import PROVIDERS
+
+        if v != "none" and v not in PROVIDERS:
+            raise ValueError(f"scrapedo_shorten_via must be 'none' or one of {PROVIDERS}")
+        return v
+
     @property
     def proxy6_configured(self) -> bool:
         return bool(self.proxy6_api_key)
+
+    @property
+    def scrapedo_configured(self) -> bool:
+        return bool(self.scrapedo_token)
+
+    def scrapedo_for(self, marketplace: str) -> bool:
+        """Идёт ли этот маркетплейс через скрейпинг-API."""
+        return self.scrapedo_configured and marketplace in self.scrapedo_marketplaces

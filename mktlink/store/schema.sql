@@ -150,7 +150,11 @@ CREATE TABLE IF NOT EXISTS proxy_attempt (
   verdict  TEXT    NOT NULL,
   -- Атрибутация егресса: наблюдение, сделанное НЕ через прокси, не может
   -- быть уликой против прокси. Скорер читает только 'proxy'.
-  egress   TEXT    NOT NULL CHECK (egress IN ('proxy','direct','forge')),
+  -- 'api' добавлен 2026-09-03: наблюдение сделано через чужой скрейпинг-API,
+  -- то есть с адреса, которым мы не владеем. Отдельное значение нужно, чтобы
+  -- скорер не считал такую попытку уликой против нашего IPv4: по этой улике
+  -- адрес заменяют за деньги, и подмешивать в неё чужие отказы нельзя.
+  egress   TEXT    NOT NULL CHECK (egress IN ('proxy','direct','forge','api')),
   latency_ms INTEGER
 ) STRICT;
 
@@ -228,6 +232,27 @@ CREATE TABLE IF NOT EXISTS shortlink (
   canonical    TEXT NOT NULL,
   hops         INTEGER NOT NULL,
   resolved_at  INTEGER NOT NULL DEFAULT (unixepoch())
+) STRICT;
+
+-- Короткие ссылки, которые создаём МЫ, чтобы подать их в скрейпинг-API.
+-- Направление обратное таблице shortlink выше: там «чужая короткая ссылка ->
+-- наша каноническая», здесь «наша каноническая -> наша короткая».
+--
+-- Кэш существует ради БЮДЖЕТА, а не ради экономии на сокращалке. Замер
+-- 2026-09-03: карточка Ozon отдаётся 9–26 с при окне ступени 13.5 с, и
+-- полтора из них уходили на повторное сокращение той же самой ссылки на
+-- КАЖДЫЙ запрос. Наблюдение 11 998 мс при окне 12 000 — успех на грани,
+-- решённый ровно этими полутора секундами. Короткая ссылка на один и тот же
+-- товар не меняется, поэтому платить за неё повторно нечем оправдать.
+--
+-- Побочная выгода: на пути запроса становится одной внешней зависимостью
+-- меньше. Недоступность clck.ru перестаёт быть отказом для уже виденного
+-- товара.
+CREATE TABLE IF NOT EXISTS outbound_shortlink (
+  canonical  TEXT PRIMARY KEY,
+  short_url  TEXT NOT NULL,
+  provider   TEXT NOT NULL,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS api_key (

@@ -57,28 +57,59 @@ class PoolView:
         return SimpleLease(proxy_id=int(row["p6_id"]), proxy_url=url)
 
 
-def build_ladder(conn: sqlite3.Connection, client: EgressClient):
+def build_ladder(
+    conn: sqlite3.Connection,
+    client: EgressClient,
+    *,
+    api_client: EgressClient | None = None,
+    api_marketplaces: frozenset[str] = frozenset(),
+):
     """Собрать боевую лестницу.
 
     Аренда адреса и слот спейсинга берутся один раз на запрос: все ступени
     идут через один адрес с одним jar, иначе вторая ступень предъявляла бы
     cookie, снятые не тем адресом.
+
+    Транспорта два, а не один, и это следствие замера, а не гибкость впрок.
+    Wildberries отвечает ``200`` с нашего собственного адреса за 7.70 ₽/мес;
+    Ozon и Я.Маркет с него недостижимы вовсе и ходят через скрейпинг-API,
+    где каждый запрос стоит кредитов. Один транспорт на всех означал бы либо
+    платить за уже работающий WB, либо не получить два маркетплейса из трёх.
+    ``api_marketplaces`` пустое — вся система работает как раньше.
     """
     jars = JarStore(conn)
     pool = PoolView(conn)
 
-    async def ladder(dl: Deadline, c: Canonical, budget_ms: int) -> Extraction:
-        lease = pool.lease()
-        if lease is None:
-            # Адреса нет вовсе. Это не ошибка запроса: forge купит первый,
-            # и повтор через Retry-After попадёт уже в рабочий пул.
-            return Extraction(verdict=Verdict.SILENT_EMPTY, reason="no_warm_jar")
+    def client_for(mp: str) -> EgressClient:
+        if api_client is not None and mp in api_marketplaces:
+            return api_client
+        return client
 
-        lease.jar = jars.get(c.marketplace, lease.proxy_id)
-        if lease.jar is None and c.marketplace in JAR_REQUIRED:
-            # Предусловие, а не обогащение: без cookie composer-api Ozon не
-            # отвечает вовсе, и пробовать нечего.
-            return Extraction(verdict=Verdict.SILENT_EMPTY, reason="no_warm_jar")
+    async def ladder(dl: Deadline, c: Canonical, budget_ms: int) -> Extraction:
+        via_api = api_client is not None and c.marketplace in api_marketplaces
+
+        if via_api:
+            # Ни своего адреса, ни своих cookie здесь не нужно: и то и другое
+            # предоставляет поставщик. Требовать аренду или jar на этом пути
+            # значило бы отказывать в работе из-за отсутствия того, что в ней
+            # не участвует, — и сообщать клиенту ложную причину «нет тёплой
+            # сессии». Спейсинг при этом остаётся: см. API_EGRESS_ID.
+            from mktlink.egress.scrapedo import API_EGRESS_ID  # noqa: PLC0415
+
+            lease = SimpleLease(proxy_id=API_EGRESS_ID, proxy_url=None)
+        else:
+            got = pool.lease()
+            if got is None:
+                # Адреса нет вовсе. Это не ошибка запроса: forge купит первый,
+                # и повтор через Retry-After попадёт уже в рабочий пул.
+                return Extraction(verdict=Verdict.SILENT_EMPTY, reason="no_warm_jar")
+            lease = got
+
+            lease.jar = jars.get(c.marketplace, lease.proxy_id)
+            if lease.jar is None and c.marketplace in JAR_REQUIRED:
+                # Предусловие, а не обогащение: без cookie composer-api Ozon не
+                # отвечает вовсе, и пробовать нечего.
+                return Extraction(verdict=Verdict.SILENT_EMPTY, reason="no_warm_jar")
         # Для остальных jar — обогащение. Пробуем и без него: иначе вердикт
         # «нет тёплой сессии» подменял бы настоящую причину отказа.
         # ЗАМЕР 2026-09-03: карточка Я.Маркета отдаёт 302 на /showcaptcha
@@ -93,17 +124,25 @@ def build_ladder(conn: sqlite3.Connection, client: EgressClient):
                 verdict=Verdict.BUDGET_EXHAUSTED, reason="spacing_wait_exceeds_budget"
             )
 
-        lane = build_lane(c.marketplace, client, SELECTORS, lease)
+        lane_client = client_for(c.marketplace)
+        lane = build_lane(c.marketplace, lane_client, SELECTORS, lease)
         ctx = Context(
             marketplace=c.marketplace,
             canonical_url=c.url,
             ids=dict(c.ids),
             offer=c.offer,
             anchor_ids=frozenset(c.ids.values()),
+            via_api=via_api,
         )
         res, rung = await run_ladder(dl, lane, ctx, budget_ms, hops=0)
 
-        _record(conn, c.marketplace, lease.proxy_id, res.verdict)
+        _record(
+            conn,
+            c.marketplace,
+            None if via_api else lease.proxy_id,
+            res.verdict,
+            egress=lane_client.egress_kind(lease.proxy_url),
+        )
 
         return Extraction(
             verdict=res.verdict,
@@ -120,26 +159,48 @@ def build_ladder(conn: sqlite3.Connection, client: EgressClient):
     return ladder
 
 
-def _record(conn: sqlite3.Connection, mp: str, proxy_id: int, verdict: Verdict) -> None:
-    """Записать исход. Штрафуется только то, что сделано ЧЕРЕЗ прокси."""
+def _record(
+    conn: sqlite3.Connection,
+    mp: str,
+    proxy_id: int | None,
+    verdict: Verdict,
+    *,
+    egress: str = "proxy",
+) -> None:
+    """Записать исход. Штрафуется только то, что сделано ЧЕРЕЗ прокси.
+
+    ``egress`` — параметр, а не константа, и это исправление дефекта.
+    Прежняя редакция вписывала ``'proxy'`` литералом при любом транспорте.
+    С появлением скрейпинг-API (:mod:`mktlink.egress.scrapedo`) это стало
+    прямой порчей: капча, полученная с ЧУЖОГО адреса, записывалась как
+    улика против нашего купленного IPv4 и приближала его замену за деньги.
+    Предикат ``charges_proxy`` умел это различать всё время — ему просто
+    никогда не передавали настоящий вид егресса.
+    """
     from mktlink.marketplaces.verdict import charges_proxy  # noqa: PLC0415
 
     conn.execute(
-        "INSERT INTO proxy_attempt (p6_id, mp, verdict, egress) VALUES (?, ?, ?, 'proxy')",
-        (proxy_id, mp, str(verdict)),
+        "INSERT INTO proxy_attempt (p6_id, mp, verdict, egress) VALUES (?, ?, ?, ?)",
+        (proxy_id, mp, str(verdict), egress),
     )
+    if egress != "proxy" or proxy_id is None:
+        # Здоровье считается по паре (НАШ адрес, маркетплейс). Наблюдения с
+        # чужого егресса в эту пару не входят вовсе, поэтому строки здоровья
+        # для них не создаётся: иначе в таблице появился бы адрес, которым мы
+        # не владеем и который нельзя ни продлить, ни заменить.
+        return
     conn.execute(
         "INSERT INTO proxy_health (p6_id, mp, ok_n, bad_n) VALUES (?, ?, 0, 0)"
         " ON CONFLICT(p6_id, mp) DO NOTHING",
         (proxy_id, mp),
     )
-    if charges_proxy(verdict, egress="proxy"):
+    if charges_proxy(verdict, egress=egress):
         conn.execute(
             "UPDATE proxy_health SET bad_n = bad_n + 1, last_bad = unixepoch()"
             " WHERE p6_id = ? AND mp = ?",
             (proxy_id, mp),
         )
-    elif verdict in (Verdict.OK, Verdict.PARTIAL):
+    elif egress == "proxy" and verdict in (Verdict.OK, Verdict.PARTIAL):
         conn.execute(
             "UPDATE proxy_health SET ok_n = ok_n + 1, last_ok = unixepoch()"
             " WHERE p6_id = ? AND mp = ?",
@@ -147,6 +208,15 @@ def _record(conn: sqlite3.Connection, mp: str, proxy_id: int, verdict: Verdict) 
         )
     # SCHEMA_DRIFT и BUDGET_EXHAUSTED не трогают ни одну колонку: это наши
     # проблемы, а не свойства адреса.
+    #
+    # Условие ``egress == "proxy"`` в ветке успеха — зеркальная половина того
+    # же исправления, и без неё оно было бы половинчатым. Успех, добытый
+    # ЧУЖИМ адресом, начислял бы заслугу нашему: ``ok_n`` рос бы, доля отказов
+    # падала, и адрес, который на самом деле ничего не отдаёт, выглядел бы
+    # здоровым. Это опаснее лишнего штрафа — штраф ведёт к замене, а ложная
+    # заслуга к тому, что мёртвый адрес держат вечно.
+    # Строка ``proxy_attempt`` при этом пишется ВСЕГДА и со своим настоящим
+    # егрессом: сырое наблюдение терять незачем, его отфильтрует читающий.
 
 
 async def _resolve_dns(host: str) -> list[str]:
@@ -187,9 +257,26 @@ def build_deps(settings: Settings | None = None, conn: sqlite3.Connection | None
 
     c = conn or connect(cfg.db_path)
     client = EgressClient()
+    # Второй клиент поднимается ТОЛЬКО когда ключ задан. Без ключа система
+    # ведёт себя ровно как до появления скрейпинг-API, и это важно: путь
+    # через чужой сервис не должен включаться сам собой.
+    api_client: EgressClient | None = None
+    api_mps: frozenset[str] = frozenset()
+    if cfg.scrapedo_configured:
+        from mktlink.egress.scrapedo import ScrapeDoTransport  # noqa: PLC0415
+        from mktlink.store.shortlinks import OutboundShortlinks  # noqa: PLC0415
+
+        api_client = EgressClient(
+            ScrapeDoTransport(
+                token=cfg.scrapedo_token or "",
+                shorten_via=cfg.scrapedo_shorten_via,
+                shorten_cache=OutboundShortlinks(c),
+            )
+        )
+        api_mps = frozenset(cfg.scrapedo_marketplaces)
     return Deps(
         cache=ProductCache(c),
-        ladder=build_ladder(c, client),
+        ladder=build_ladder(c, client, api_client=api_client, api_marketplaces=api_mps),
         # Требование 2 подключено здесь и только здесь. Раскрутка идёт прямым
         # егрессом: каждый её хоп через прокси взял бы слот спейсинга, и при
         # интервале Ozon в 5 с лестницы для короткой ссылки не осталось бы.
