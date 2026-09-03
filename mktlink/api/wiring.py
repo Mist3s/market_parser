@@ -136,16 +136,51 @@ def _record(conn: sqlite3.Connection, mp: str, proxy_id: int, verdict: Verdict) 
     # проблемы, а не свойства адреса.
 
 
+async def _resolve_dns(host: str) -> list[str]:
+    """Резолв для SSRF-проверки.
+
+    Отдельно от соединения намеренно: проверяем ВСЕ адреса ответа, а не тот,
+    который выберет ОС. Ответ с одним публичным и одним приватным адресом
+    иначе проходит и подключается к приватному.
+    """
+    import asyncio  # noqa: PLC0415
+    import socket  # noqa: PLC0415
+
+    loop = asyncio.get_running_loop()
+    infos = await loop.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+    return [str(info[4][0]) for info in infos]
+
+
+async def _fetch_hop(url: str, timeout_ms: int) -> tuple[int, str | None]:
+    """Один хоп раскрутки. Прямой егресс, без прокси, без автоследования."""
+    from curl_cffi.requests import AsyncSession  # noqa: PLC0415
+
+    from mktlink.urls.redirects import HOP_HEADERS  # noqa: PLC0415
+
+    async with AsyncSession(trust_env=False) as s:
+        r = await s.get(
+            url,
+            headers=HOP_HEADERS,
+            timeout=timeout_ms / 1000,
+            allow_redirects=False,
+        )
+        return r.status_code, r.headers.get("Location")
+
+
 def build_deps(settings: Settings | None = None, conn: sqlite3.Connection | None = None) -> Deps:
     cfg = settings or Settings()
     from mktlink.store.db import connect  # noqa: PLC0415
+    from mktlink.urls.redirects import RedirectResolver  # noqa: PLC0415
 
     c = conn or connect(cfg.db_path)
     client = EgressClient()
     return Deps(
         cache=ProductCache(c),
         ladder=build_ladder(c, client),
-        resolver=None,  # раскрутка подключается вместе с DNS-резолвером
+        # Требование 2 подключено здесь и только здесь. Раскрутка идёт прямым
+        # егрессом: каждый её хоп через прокси взял бы слот спейсинга, и при
+        # интервале Ozon в 5 с лестницы для короткой ссылки не осталось бы.
+        resolver=RedirectResolver(_fetch_hop, _resolve_dns),
         budget_ms=cfg.response_budget_ms,
         ym_region_id=cfg.ym_region_id,
     )

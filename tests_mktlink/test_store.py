@@ -307,3 +307,33 @@ def test_egress_attribution_is_constrained(conn) -> None:
         conn.execute(
             "INSERT INTO proxy_attempt (mp, verdict, egress) VALUES ('ym', 'OK', 'guess')"
         )
+
+
+def test_a_connection_survives_use_from_another_thread(tmp_path) -> None:
+    """Дефект, который проявляется только под настоящим ASGI-сервером.
+
+    Соединение, привязанное к потоку создания, падает на первом же запросе,
+    потому что сервер обслуживает в потоках пула. Тесты чистых функций этого
+    не видят вовсе.
+    """
+    import sqlite3
+    import threading
+
+    init_db(tmp_path / "t.sqlite")
+    c = db_connect(tmp_path / "t.sqlite")
+    assert sqlite3.threadsafety == 3, "иначе cross-thread небезопасен и код обязан отказать"
+
+    result: list[object] = []
+
+    def worker() -> None:
+        try:
+            c.execute("INSERT INTO rejections (code) VALUES ('x')")
+            result.append(c.execute("SELECT COUNT(*) AS n FROM rejections").fetchone()["n"])
+        except Exception as exc:  # noqa: BLE001
+            result.append(exc)
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join()
+    c.close()
+    assert result == [1], result

@@ -17,6 +17,17 @@
   маленький, записей единицы в минуту, а терять запись never-renew нельзя.
 * Деньги живут в целых копейках. Плавающая точка в деньгах — это ошибка,
   которая проявляется не сразу и не воспроизводится.
+* ``check_same_thread=False``, и это НЕ отключение защиты. ASGI-сервер
+  обслуживает запросы в потоках пула, поэтому соединение, привязанное к
+  потоку создания, падает на первом же запросе — дефект, который проявляется
+  только под настоящим сервером и не виден в тестах чистых функций.
+  Безопасность обеспечивает сам SQLite: модуль собран в режиме SERIALIZED
+  (``sqlite3.threadsafety == 3``), то есть сериализует доступ внутри себя.
+  Проверяется ассертом при открытии, а не предполагается.
+* Вызовы sqlite3 блокирующие и на время работы держат событийный цикл. При
+  трёх запросах в минуту и локальном файле это микросекунды, и выносить их
+  в пул было бы сложностью без выигрыша. Если поток вырастет на порядки,
+  это первое место, куда смотреть.
 """
 
 from __future__ import annotations
@@ -41,11 +52,18 @@ def connect(path: str | Path, *, read_only: bool = False) -> sqlite3.Connection:
     остальные — нет, и молчаливая потеря ``foreign_keys`` после переоткрытия
     файла давала бы висячие ссылки.
     """
+    if sqlite3.threadsafety != 3:
+        raise RuntimeError(
+            "sqlite3 is not built in SERIALIZED mode "
+            f"(threadsafety={sqlite3.threadsafety}); cross-thread use is unsafe"
+        )
     target = str(path)
     if read_only:
-        conn = sqlite3.connect(f"file:{target}?mode=ro", uri=True, isolation_level=None)
+        conn = sqlite3.connect(
+            f"file:{target}?mode=ro", uri=True, isolation_level=None, check_same_thread=False
+        )
     else:
-        conn = sqlite3.connect(target, isolation_level=None)
+        conn = sqlite3.connect(target, isolation_level=None, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
     conn.execute("PRAGMA journal_mode = WAL")
