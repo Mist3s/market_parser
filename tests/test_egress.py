@@ -25,8 +25,8 @@ def a_jar(**kw) -> Jar:
         marketplace="ym",
         proxy_id=7,
         cookie_header="yandexuid=1; yandex_gid=213",
-        user_agent="Mozilla/5.0 (Macintosh; rv:133.0) Gecko/20100101 Firefox/133.0",
-        firefox_major=133,
+        user_agent="Mozilla/5.0 (Macintosh; rv:152.0) Gecko/20100101 Firefox/152.0",
+        firefox_major=147,
         minted_at=int(time.time()),
     )
     base.update(kw)
@@ -104,7 +104,7 @@ async def test_replay_uses_the_observed_ua_and_the_jar_cookies() -> None:
     sent = sink[0]
     assert sent["headers"]["User-Agent"] == jar.user_agent, "наблюдённый, не константа"
     assert sent["headers"]["Cookie"] == jar.cookie_header
-    assert sent["impersonate"] == "firefox133", "Camoufox это Firefox"
+    assert sent["impersonate"] == "firefox147", "самая новая доступная цель"
     assert "sec-ch-ua" not in sent["headers"], "Firefox их не шлёт"
 
 

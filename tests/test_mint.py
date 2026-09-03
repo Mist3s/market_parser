@@ -22,7 +22,7 @@ from mktlink.mint.rpc import MINT_HARD_CAP_MS, Coalescer, Frame, Request
 from mktlink.store.db import connect, init_db
 from mktlink.timing.deadline import Deadline, OffRequestPathViolation, bind, unbind
 
-FF_UA = "Mozilla/5.0 (X11; Linux x86_64; rv:133.0) Gecko/20100101 Firefox/133.0"
+FF_UA = "Mozilla/5.0 (X11; Linux x86_64; rv:152.0) Gecko/20100101 Firefox/152.0"
 
 
 @pytest.fixture
@@ -146,11 +146,23 @@ async def test_missing_required_cookies_fail_the_mint(jars) -> None:
     assert REQUIRED_COOKIES["wb"] == frozenset(), "WB cookie не требует"
 
 
-async def test_a_drifted_browser_build_breaks_the_mint_not_the_success_rate(jars) -> None:
-    b = FakeBrowser(ua=FF_UA.replace("133", "140"))
-    with pytest.raises(FingerprintDrift, match="bump"):
-        await mint(b, jars, marketplace="ym", proxy_id=7,
+async def test_a_browser_older_than_the_forged_version_breaks_the_mint(jars) -> None:
+    """Подделывать версию новее установленной нельзя.
+
+    Отпечаток из будущего — аномалия сам по себе, поэтому ломается сборка,
+    а не success rate через три недели.
+    """
+    older = FakeBrowser(ua=FF_UA.replace("152", "140"))
+    with pytest.raises(FingerprintDrift, match="does not exist yet"):
+        await mint(older, jars, marketplace="ym", proxy_id=7,
                    proxy_url="http://p:1@h:8000", verify_replay=yes)
+
+
+async def test_a_gap_within_tolerance_is_accepted(jars) -> None:
+    """Равенства мажоров не бывает: замер дал Firefox 152 против цели 147."""
+    res = await mint(FakeBrowser(), jars, marketplace="ym", proxy_id=7,
+                     proxy_url="http://p:1@h:8000", verify_replay=yes)
+    assert res.ok, res.detail
 
 
 async def test_the_region_is_forced_into_the_cookies_too(jars) -> None:
@@ -184,7 +196,7 @@ async def test_minting_inside_a_request_is_refused(jars) -> None:
 
 
 async def test_the_observed_ua_is_stored_not_the_profile_constant(jars) -> None:
-    rotated = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0"
+    rotated = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0"
     await mint(FakeBrowser(ua=rotated), jars, marketplace="ym", proxy_id=7,
                proxy_url="http://p:1@h:8000", verify_replay=yes)
     jar = jars.get("ym", 7)

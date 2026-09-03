@@ -161,3 +161,45 @@ def test_an_empty_body_with_404_is_not_mistaken_for_a_missing_product() -> None:
     """
     assert wb.classify_response(None, 404) is Verdict.SILENT_EMPTY
     assert wb.classify_response(None, 404) is not Verdict.NOT_FOUND
+
+
+#: Заголовки двух РАЗНЫХ страниц блока на одном и том же URL, замерено
+#: настоящим Camoufox 152 (см. ozon.BLOCK_SIGNATURES).
+PROXIED_BLOCK_TITLE = "Похоже, нет соединения"
+DIRECT_BLOCK_TITLE = "Antibot Captcha"
+
+
+def test_the_datacentre_proxy_gets_a_worse_answer_than_no_proxy() -> None:
+    """Главный замер: прокси не помогает Ozon, а мешает.
+
+    Через датацентровый IPv4 proxy6 Ozon отдаёт замаскированный отказ и НЕ
+    предлагает челлендж вовсе — адрес в блок-листе. Напрямую отдаёт «Antibot
+    Captcha», то есть челлендж предложен и адрес лишь не доверенный.
+
+    Отсюда вывод, который стоит держать проверяемым: эскалация тарифа
+    v3 → v4 у Ozon не решает задачу, потому что дело не в выделенности
+    адреса, а в его принадлежности датацентру.
+    """
+    assert PROXIED_BLOCK_TITLE.casefold() in ozon.BLOCK_SIGNATURES
+    assert DIRECT_BLOCK_TITLE.casefold() in ozon.BLOCK_SIGNATURES
+    assert len(ozon.BLOCK_SIGNATURES) == 2, "две разные страницы, а не одна"
+
+
+def test_neither_block_page_is_recognisable_by_the_inherited_markers() -> None:
+    """Ни «робот», ни «капча» в проксированной странице не встречаются."""
+    from tests.legacy_reference import legacy_detects_block
+
+    proxied = f"<html><head><title>{PROXIED_BLOCK_TITLE}</title></head><body></body></html>"
+    assert not legacy_detects_block(proxied), "унаследованный детектор её не видит"
+    # А статус видит.
+    assert ozon.classify_response(proxied, None, 403) is Verdict.CAPTCHA
+
+
+def test_a_real_browser_does_not_rescue_a_blocked_address() -> None:
+    """Camoufox 152 с geoip=True получил тот же 403, что и curl_cffi.
+
+    Значит проблема не в качестве отпечатка, и вкладывать в стелс дальше
+    бессмысленно — надо менять адрес, а не браузер.
+    """
+    for status in (403,):
+        assert ozon.classify_response("x" * 5093, None, status) is Verdict.CAPTCHA
