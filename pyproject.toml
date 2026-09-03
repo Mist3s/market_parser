@@ -30,12 +30,34 @@ dev = [
   "pytest-asyncio>=0.23.0",
   "ruff>=0.5.0",
 ]
+# --- mktlink: сервис «ссылка → название + продавец» ---------------------------
+# Два экстра намеренно раздельны, и это ЕДИНСТВЕННАЯ проверяемая в CI
+# формулировка запрета браузера на пути запроса: в образе `api` нет ни camoufox,
+# ни playwright, поэтому браузер там не импортируется — потому что его там нет.
+mktlink-api = [
+  "fastapi>=0.115.0",
+  "uvicorn>=0.30.0",
+  "pydantic>=2.8.0",
+  "pydantic-settings>=2.3.0",
+  # curl_cffi, а не httpx: реплей Camoufox-jar требует подделки JA3/JA4 и
+  # HTTP/2 SETTINGS, чего httpx не умеет вообще. Без этого тёплого пути нет.
+  "curl_cffi>=0.7.0",
+  "beautifulsoup4>=4.12.0",
+  "orjson>=3.10.0",
+]
+mktlink-forge = [
+  "camoufox>=0.4.11",
+  "playwright>=1.45.0,<1.49",
+  "curl_cffi>=0.7.0",
+  "orjson>=3.10.0",
+]
 
 [project.scripts]
 market-parser = "market_parser.cli:main"
+mkt = "mktlink.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["market_parser*"]
+include = ["market_parser*", "mktlink*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

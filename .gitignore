@@ -15,3 +15,6 @@ google-service-account*.json
 google-sa.json
 *-sa.json
 run_logs/
+.venv-mktlink/
+.coverage
+.vscode/
