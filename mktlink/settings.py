@@ -1,0 +1,81 @@
+"""Конфигурация. Префикс ``MKTLINK_``, ни одного ``os.environ`` больше нигде."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from mktlink.constants import (
+    RESPONSE_BUDGET_DEFAULT_MS,
+    RESPONSE_BUDGET_MAX_MS,
+    RESPONSE_BUDGET_MIN_MS,
+)
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_prefix="MKTLINK_",
+        extra="ignore",
+    )
+
+    # --- ручка -------------------------------------------------------------
+    #: Потолок ответа. Диапазон ровно тот, что назвал заказчик.
+    #:
+    #: Дефолт 15000, а не 5000, и вот почему. При 2–3 запросах в минуту на
+    #: произвольных пользовательских ссылках попадание в продуктовый кэш
+    #: близко к нулю: почти каждый запрос холодный по товару. Тёплым остаётся
+    #: только jar, и он держится фоновым обновлением, а не трафиком. 15 секунд
+    #: покупают не скорость обычного запроса (он и при 5000 идёт за ~0.7–1.5 с),
+    #: а возможность ДОЖДАТЬСЯ идущего минтинга вместо ответа 202.
+    response_budget_ms: int = Field(
+        default=RESPONSE_BUDGET_DEFAULT_MS,
+        ge=RESPONSE_BUDGET_MIN_MS,
+        le=RESPONSE_BUDGET_MAX_MS,
+    )
+
+    # --- хранилище ----------------------------------------------------------
+    db_path: Path = Field(default=Path("data/mktlink.sqlite"))
+    #: Сокет к forge. Абстрактных адресов не используем: файл виден в ps и
+    #: правами ограничивается, абстрактный — нет.
+    forge_socket: Path = Field(default=Path("data/forge.sock"))
+
+    # --- proxy6 -------------------------------------------------------------
+    proxy6_api_key: str | None = None
+    proxy6_country: str = "ru"
+    #: Период закупки по умолчанию. Короткий намеренно: при ленивой модели
+    #: неудачная покупка должна дёшево истечь, а не висеть оплаченной месяц.
+    proxy6_period_days: int = Field(default=7, ge=1, le=90)
+
+    # --- маркетплейсы --------------------------------------------------------
+    #: Регион Я.Маркета форсируется на исходящем (lr=213), поэтому в ключ кэша
+    #: не входит. Если Phase 0 покажет, что Яндекс параметр игнорирует, регион
+    #: переезжает в ключ и в meta как наблюдённый, а не утверждённый.
+    ym_region_id: int = 213
+
+    #: Ступень рендера Я.Маркета по умолчанию ВЫКЛЮЧЕНА: браузера на пути
+    #: запроса не бывает. Включается только явным решением заказчика и стоит
+    #: +5 с к p95.
+    ym_render_enabled: bool = False
+
+    # --- эксплуатация --------------------------------------------------------
+    log_level: str = "INFO"
+    metrics_enabled: bool = True
+
+    @field_validator("db_path", "forge_socket")
+    @classmethod
+    def _absolutise(cls, v: Path) -> Path:
+        return v
+
+    @property
+    def client_timeout_hint_ms(self) -> int:
+        """Что подсказать клиенту: его таймаут обязан быть выше нашего."""
+        from mktlink.constants import CLIENT_TIMEOUT_MARGIN_MS
+
+        return self.response_budget_ms + CLIENT_TIMEOUT_MARGIN_MS
+
+    @property
+    def proxy6_configured(self) -> bool:
+        return bool(self.proxy6_api_key)
