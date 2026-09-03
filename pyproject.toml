@@ -3,38 +3,15 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "market-parser"
+name = "mktlink"
 version = "0.1.0"
-description = "Daily baby food price collector for Russian retail/e-commerce stores."
+description = "Название и продавец по ссылке на товар: Ozon, Wildberries, Яндекс.Маркет."
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = [
-  "beautifulsoup4>=4.12.0",
-  "camoufox>=0.4.11",
-  "google-api-python-client>=2.130.0",
-  "google-auth>=2.30.0",
-  "httpx>=0.27.0",
-  "openpyxl>=3.1.0",
-  # <1.49: версия должна совпадать с базовым Docker-образом (v1.48.0), иначе
-  # playwright ищет chromium не той сборки. И не выше 1.4x: новые драйверы
-  # несовместимы с camoufox 0.4.x (Node-драйвер падает с TypeError reading url).
-  "playwright>=1.45.0,<1.49",
-  "pydantic-settings>=2.3.0",
-  "tenacity>=8.3.0",
-  "tzdata>=2024.1; platform_system == 'Windows'",
-]
 
-[project.optional-dependencies]
-dev = [
-  "pytest>=8.2.0",
-  "pytest-asyncio>=0.23.0",
-  "ruff>=0.5.0",
-]
-# --- mktlink: сервис «ссылка → название + продавец» ---------------------------
-# Два экстра намеренно раздельны, и это ЕДИНСТВЕННАЯ проверяемая в CI
-# формулировка запрета браузера на пути запроса: в образе `api` нет ни camoufox,
-# ни playwright, поэтому браузер там не импортируется — потому что его там нет.
-mktlink-api = [
+# Общее ядро: чистые модули плюс HTTP-путь запроса. Браузера здесь нет
+# намеренно — см. extras ниже.
+dependencies = [
   "fastapi>=0.115.0",
   "uvicorn>=0.30.0",
   "pydantic>=2.8.0",
@@ -42,26 +19,40 @@ mktlink-api = [
   # curl_cffi, а не httpx: реплей Camoufox-jar требует подделки JA3/JA4 и
   # HTTP/2 SETTINGS, чего httpx не умеет вообще. Без этого тёплого пути нет.
   "curl_cffi>=0.7.0",
-  "beautifulsoup4>=4.12.0",
   "orjson>=3.10.0",
 ]
-mktlink-forge = [
+
+[project.optional-dependencies]
+# ЕДИНСТВЕННАЯ проверяемая в CI формулировка запрета браузера на пути
+# запроса: в окружении `api` нет ни camoufox, ни playwright, поэтому браузер
+# там не импортируется — потому что его там нет.
+forge = [
   "camoufox>=0.4.11",
+  # <1.49: версия обязана совпадать с базовым образом playwright, иначе
+  # драйвер ищет chromium не той сборки; и не выше 1.4x — новые драйверы
+  # несовместимы с camoufox 0.4.x.
   "playwright>=1.45.0,<1.49",
-  "curl_cffi>=0.7.0",
-  "orjson>=3.10.0",
+]
+dev = [
+  "pytest>=8.2.0",
+  "pytest-asyncio>=0.23.0",
+  "httpx>=0.27.0",
+  "ruff>=0.5.0",
 ]
 
 [project.scripts]
-market-parser = "market_parser.cli:main"
 mkt = "mktlink.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["market_parser*", "mktlink*"]
+include = ["mktlink*"]
+
+[tool.setuptools.package-data]
+mktlink = ["store/schema.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+addopts = "-q"
 
 [tool.ruff]
 line-length = 100

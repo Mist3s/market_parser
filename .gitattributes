@@ -1,2 +1,0 @@
-# Shell scripts must keep LF endings so they run on Linux/VM (cron).
-*.sh text eol=lf

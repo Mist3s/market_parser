@@ -1,27 +1,53 @@
-# Версия образа должна совпадать с пином playwright в pyproject.toml (<1.50,
-# иначе драйвер несовместим с camoufox 0.4.x и браузеры падают на старте).
-FROM mcr.microsoft.com/playwright/python:v1.48.0-noble
+# Два образа из одного файла, и это не удобство сборки, а инвариант.
+#
+# Запрет браузера на пути запроса — единственная формулировка, которую можно
+# проверить в CI: в целевом образе `api` нет ни camoufox, ни playwright,
+# поэтому браузер там не импортируется, потому что его там нет. Гард в коде
+# (assert_off_request_path) закрывает proxy6 полностью, а для браузера он
+# неполон — разработчик, написавший запуск прямо в обработчике, его не задел
+# бы. Упаковка закрывает и это.
+
+# --- api: путь запроса, без браузера ------------------------------------
+FROM python:3.12-slim AS api
 
 WORKDIR /app
-
 COPY pyproject.toml README.md ./
-COPY market_parser ./market_parser
-
+COPY mktlink ./mktlink
 RUN pip install --no-cache-dir .
 
-# Антибот-браузер Camoufox (для ozon, wildberries, lenta и др.) — качаем на этапе сборки.
+ENV PYTHONUNBUFFERED=1 \
+    MKTLINK_DB_PATH=/app/data/mktlink.sqlite \
+    MKTLINK_FORGE_SOCKET=/app/data/forge.sock
+
+# Проверка инварианта на этапе сборки: если браузер сюда просочился
+# зависимостью, образ не соберётся, а не сломается в проде.
+RUN python -c "\
+import importlib.util as u, sys;\
+bad=[m for m in ('camoufox','playwright') if u.find_spec(m)];\
+sys.exit('browser leaked into the api image: %s' % bad) if bad else None"
+
+# Том для /app/data: там SQLite с never_renew, тратами и jar. Инструкцию
+# VOLUME не используем — часть билдеров её не поддерживает.
+EXPOSE 8000
+CMD ["uvicorn", "mktlink.api.app:create_app", "--factory", \
+     "--host", "0.0.0.0", "--port", "8000", \
+     "--timeout-keep-alive", "20", "--workers", "1"]
+
+# --- forge: браузер и владение proxy6 -----------------------------------
+FROM mcr.microsoft.com/playwright/python:v1.48.0-noble AS forge
+
+WORKDIR /app
+COPY pyproject.toml README.md ./
+COPY mktlink ./mktlink
+RUN pip install --no-cache-dir ".[forge]"
+# Качаем антибот-браузер на этапе сборки: минтинг не должен платить за
+# загрузку при первом же запросе.
 RUN python -m camoufox fetch
 
-# PYTHONUNBUFFERED — чтобы прогресс прогона появлялся в логах Railway сразу, а не в конце.
 ENV PYTHONUNBUFFERED=1 \
-    MARKET_PARSER_DB_PATH=/app/data/market_parser.sqlite \
-    MARKET_PARSER_EXPORT_DIR=/app/exports \
-    MARKET_PARSER_TIMEZONE=Europe/Moscow
+    MKTLINK_DB_PATH=/app/data/mktlink.sqlite \
+    MKTLINK_FORGE_SOCKET=/app/data/forge.sock
 
-# Том для /app/data (история цен) подключается снаружи: Railway Volume или `docker -v`.
-# Инструкцию VOLUME не используем — билдер Railway её не поддерживает.
-
-ENTRYPOINT ["market-parser"]
-# Дневной cron-прогон: собрать 16 авто-магазинов, выгрузить XLSX/Google и
-# отправить сводку + файл в Telegram. Процесс завершается — как и нужно cron-сервису Railway.
-CMD ["run", "--auto", "--telegram"]
+# Один экземпляр: forge — единственный писатель в proxy6, и процесс-локальный
+# ограничитель 3 rps корректен только при этом условии.
+CMD ["python", "-m", "mktlink.mint.main"]

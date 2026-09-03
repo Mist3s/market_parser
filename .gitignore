@@ -1,20 +1,15 @@
 .env
 .venv/
+.venv-mktlink/
 __pycache__/
-.pytest_cache/
-.ruff_cache/
 *.pyc
 *.egg-info/
-data/
-exports/
-logs/
-playwright-report/
-test-results/
-service-account*.json
-google-service-account*.json
-google-sa.json
-*-sa.json
-run_logs/
-.venv-mktlink/
+.pytest_cache/
+.ruff_cache/
 .coverage
 .vscode/
+# Рабочее состояние: SQLite с метками never_renew, тратами и cookie-jar.
+# В прод монтируется томом — потеря delete_after стоит неограниченных денег.
+data/
+logs/
+*.sock

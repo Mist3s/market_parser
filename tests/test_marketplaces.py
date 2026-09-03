@@ -9,6 +9,12 @@ import pytest
 from mktlink.marketplaces import ozon, wb, ym
 from mktlink.marketplaces.selectors import DEFAULTS, REGISTRY, Selectors
 from mktlink.marketplaces.verdict import SellerStatus, Verdict
+from tests.legacy_reference import (
+    LEGACY_MARKERS_WORTH_KEEPING,
+    legacy_detects_block,
+    legacy_looks_like_catalog,
+    legacy_parse_ozon_widgets,
+)
 
 # --- Ozon ---------------------------------------------------------------------
 
@@ -49,11 +55,10 @@ def test_ozon_pdp_is_parsed_by_qa_attributes() -> None:
 def test_ozon_listing_key_filter_is_not_reused_for_the_card() -> None:
     """Ключи tile/searchresult категорийные; на карточке их нет.
 
-    Репозиторный parse_ozon_widgets вернул бы пустой список.
+    Эталон — дословная копия фильтра из удалённого скрейпера
+    (см. legacy_reference). На карточке он не пропускает ничего, то есть
+    не отличает «мы не понимаем эту страницу» от «товаров не найдено».
     """
-    pytest.importorskip("tenacity", reason="сравнение с батч-скрейпером требует его зависимостей")
-    from market_parser.stores.ozon import parse_ozon_widgets
-
     payload = {
         "widgetStates": {
             "webProductHeading-3311": json.dumps(
@@ -62,8 +67,14 @@ def test_ozon_listing_key_filter_is_not_reused_for_the_card() -> None:
             )
         }
     }
-    assert parse_ozon_widgets(payload, store_name="Озон", category="x") == []
+    assert legacy_parse_ozon_widgets(payload) == 0, "категорийный фильтр карточку не видит"
     assert ozon.parse_pdp(payload, DEFAULTS["ozon"], sku="1").name == "Смесь"
+
+
+def test_the_legacy_key_filter_only_ever_matched_listing_keys() -> None:
+    """Показываем, что фильтр не сломан, а просто про другую страницу."""
+    listing = {"widgetStates": {"tileGridDesktop-1": json.dumps({"items": [{}, {}]})}}
+    assert legacy_parse_ozon_widgets(listing) == 2, "на листинге он работает"
 
 
 def test_an_empty_composer_answer_is_a_silent_block_not_a_missing_product() -> None:
@@ -162,20 +173,25 @@ def test_ym_captcha_is_recognised_before_anything_else() -> None:
     assert ym.classify_response(html, anchor_ids={"1"}) is Verdict.CAPTCHA
 
 
-def test_repo_guard_would_have_short_circuited_the_marker_scan() -> None:
-    """_looks_like_catalog делает ранний выход при application/ld+json.
+def test_legacy_guard_short_circuited_the_marker_scan() -> None:
+    """Ранний выход при application/ld+json закорачивал всю проверку.
 
-    Настоящая карточка его содержит, значит сканирование маркеров в
-    репозиторной функции не выполнялось бы никогда, и проверку нельзя было бы
-    провалидировать тестом.
+    Настоящая карточка эту подстроку содержит штатно, значит сканирование
+    антибот-маркеров не выполнялось НИКОГДА, и проверку нельзя было бы
+    провалидировать тестом: невозможно отличить «маркеры работают» от
+    «guard закоротил».
     """
-    pytest.importorskip("tenacity", reason="сравнение с батч-скрейпером требует его зависимостей")
-    from market_parser.stores.html_extractors import _looks_like_catalog, ensure_not_blocked
-
-    challenge = '<html>application/ld+json showcaptcha</html>'
-    assert _looks_like_catalog(challenge), "ранний выход срабатывает"
-    ensure_not_blocked(challenge, "Яндекс.Маркет")  # не бросает — вот дыра
+    challenge = "<html>application/ld+json showcaptcha</html>"
+    assert legacy_looks_like_catalog(challenge), "ранний выход срабатывает"
+    assert not legacy_detects_block(challenge), "и челлендж проходит как нормальная страница"
     assert ym.classify_response(challenge, anchor_ids={"1"}) is Verdict.CAPTCHA
+
+
+def test_the_legacy_marker_list_is_field_intelligence_worth_inheriting() -> None:
+    """Список маркеров — единственная часть, невыводимая из первых принципов."""
+    inherited = {m for m in LEGACY_MARKERS_WORTH_KEEPING if "captcha" in m}
+    assert inherited, "маркеры капчи унаследованы"
+    assert legacy_detects_block("<html>вы не робот</html>"), "без раннего выхода он работал"
 
 
 def test_a_page_without_identity_is_a_silent_block() -> None:
