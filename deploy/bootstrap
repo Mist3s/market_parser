@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Первый запуск административным ключом. Повторный запуск сохраняет настройки и данные.
+set -Eeuo pipefail
+[[ $EUID == 0 ]] || { echo 'нужен root' >&2; exit 1; }
+HERE=$(cd -- "$(dirname -- "$0")" && pwd)
+bash -n "$HERE/mktlink-deploy"
+install -d -m 700 /opt/mktlink
+install -d -m 750 -o 10002 -g 10002 /var/lib/mktlink/data
+if [[ ! -e /opt/mktlink/mktlink.env ]]; then
+    install -m 600 /dev/null /opt/mktlink/mktlink.env
+fi
+docker network inspect pilchai-mktlink >/dev/null 2>&1 \
+    || docker network create --internal pilchai-mktlink >/dev/null
+[[ $(docker network inspect -f '{{.Internal}}' pilchai-mktlink) == true ]] \
+    || { echo 'pilchai-mktlink должна быть внутренней сетью' >&2; exit 1; }
+install -m 755 "$HERE/mktlink-deploy" /usr/local/bin/mktlink-deploy.new
+mv /usr/local/bin/mktlink-deploy.new /usr/local/bin/mktlink-deploy

@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# Forced-command отдельного ключа Actions: deploy/rollback/local <40-символьный SHA>, status.
+# GHCR credentials приходят stdin как user:token; ключ не даёт оболочку и port forwarding.
+set -Eeuo pipefail
+ROOT=/opt/mktlink
+IMAGE_REPO=ghcr.io/mist3s/market_parser
+die() { printf '[mktlink] %s\n' "$*" >&2; exit 1; }
+[[ $EUID == 0 ]] || die 'нужен root'
+read -r -a args <<< "${SSH_ORIGINAL_COMMAND:-$*}"
+[[ ${#args[@]} -gt 0 ]] || die 'нужна команда'
+case ${args[0]} in
+    status) [[ ${#args[@]} == 1 ]] || die 'лишние аргументы' ;;
+    deploy|rollback|local)
+        [[ ${#args[@]} == 2 && ${args[1]} =~ ^[0-9a-f]{40}$ ]] || die 'нужен полный SHA' ;;
+    *) die 'неизвестная команда' ;;
+esac
+
+# Общий с pilchai lock: его prune не должен удалить ещё не запущенный образ парсера.
+exec 9>/run/lock/pilchai-deploy.lock
+flock -w 600 9 || die 'другое развёртывание не завершилось'
+compose() {
+    docker compose --project-directory "$ROOT" -f "$ROOT/docker-compose.yml" \
+        --env-file "$ROOT/.image" "$@"
+}
+if [[ ${args[0]} == status ]]; then
+    [[ -f $ROOT/.image ]] || die 'ещё не развёрнут'
+    compose ps
+    exit
+fi
+[[ -f $ROOT/mktlink.env ]] || die 'сначала выполните deploy/bootstrap'
+[[ $(docker network inspect -f '{{.Internal}}' pilchai-mktlink) == true ]] \
+    || die 'нужна внутренняя сеть pilchai-mktlink'
+
+work=$(mktemp -d "$ROOT/.deploy.XXXXXX")
+container=
+cleanup() {
+    if [[ -n $container ]]; then docker rm "$container" >/dev/null 2>&1 || true; fi
+    rm -rf -- "$work"
+}
+trap cleanup EXIT
+# Изолированный конфиг: не меняем авторизацию других развёртываний на хосте.
+export DOCKER_CONFIG="$work/docker"
+mkdir -m 700 "$DOCKER_CONFIG"
+image="$IMAGE_REPO:${args[1]}"
+if [[ ${args[0]} != local ]]; then
+    IFS= read -r credentials || true
+    [[ ${credentials:-} == *:* ]] || die 'ожидались user:token на stdin'
+    user=${credentials%%:*}; token=${credentials#*:}
+    [[ -n $user && -n $token ]] || die 'пустые credentials'
+    printf '%s' "$token" | docker login ghcr.io -u "$user" --password-stdin >/dev/null
+    unset credentials token
+    docker pull -q "$image"
+else
+    docker image inspect "$image" >/dev/null || die 'локального образа нет'
+fi
+container=$(docker create "$image")
+docker cp "$container:/app/deploy" "$work/deploy"
+docker rm "$container" >/dev/null
+container=
+bash -n "$work/deploy/mktlink-deploy"
+MKTLINK_IMAGE="$image" docker compose --project-directory "$ROOT" \
+    -f "$work/deploy/docker-compose.yml" --env-file /dev/null config -q
+
+previous=false
+if [[ -f $ROOT/.image && -f $ROOT/docker-compose.yml ]]; then
+    cp "$ROOT/.image" "$work/image.previous"
+    cp "$ROOT/docker-compose.yml" "$work/compose.previous"
+    previous=true
+fi
+cp "$work/deploy/docker-compose.yml" "$ROOT/docker-compose.yml"
+printf 'MKTLINK_IMAGE=%s\n' "$image" > "$ROOT/.image"
+rollback() {
+    if $previous; then
+        cp "$work/image.previous" "$ROOT/.image"
+        cp "$work/compose.previous" "$ROOT/docker-compose.yml"
+        compose up -d --wait --wait-timeout 90 mktlink </dev/null \
+            || die 'прежний образ тоже не готов; требуется администратор'
+    else
+        compose stop mktlink </dev/null || true
+        rm -f "$ROOT/.image"
+    fi
+    die 'новый образ не готов, развёртывание отменено'
+}
+# Схема создаётся отдельно; рабочая SQLite остаётся на хосте при любом исходе.
+if ! compose run --rm --no-deps -T mktlink mkt init-db </dev/null; then rollback; fi
+if ! compose up -d --wait --wait-timeout 90 mktlink </dev/null; then rollback; fi
+if $previous; then
+    cp "$work/image.previous" "$ROOT/.image.previous"
+    cp "$work/compose.previous" "$ROOT/docker-compose.yml.previous"
+fi
+install -m 755 "$work/deploy/mktlink-deploy" /usr/local/bin/mktlink-deploy.new
+mv /usr/local/bin/mktlink-deploy.new /usr/local/bin/mktlink-deploy
+printf '[mktlink] развёрнут %s\n' "$image"

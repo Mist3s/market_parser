@@ -1,0 +1,46 @@
+name: market-parser
+
+services:
+  mktlink:
+    image: ${MKTLINK_IMAGE:?нужен образ с SHA коммита}
+    restart: unless-stopped
+    env_file:
+      - /opt/mktlink/mktlink.env
+    environment:
+      MKTLINK_DB_PATH: /app/data/mktlink.sqlite
+      MKTLINK_FORGE_SOCKET: /app/data/forge.sock
+    volumes:
+      - /var/lib/mktlink/data:/app/data
+    networks:
+      - pilchai-mktlink
+      - egress
+    # ports отсутствует: API доступен только хосту и участникам сети Docker.
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 128
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: [CMD, python, /app/deploy/healthcheck.py]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    stop_grace_period: 40s
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+networks:
+  pilchai-mktlink:
+    external: true
+    name: pilchai-mktlink
+  # Внутренняя сеть связывает сервисы, отдельная сеть даёт исходящий доступ.
+  egress:
+    driver: bridge

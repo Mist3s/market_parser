@@ -14,6 +14,10 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY mktlink ./mktlink
 RUN pip install --no-cache-dir .
+COPY deploy ./deploy
+RUN groupadd --gid 10002 mktlink && useradd --uid 10002 --gid 10002 --no-create-home mktlink \
+    && mkdir -p /app/data && chown 10002:10002 /app/data
+LABEL org.opencontainers.image.source="https://github.com/Mist3s/market_parser"
 
 ENV PYTHONUNBUFFERED=1 \
     MKTLINK_DB_PATH=/app/data/mktlink.sqlite \
@@ -29,6 +33,7 @@ sys.exit('browser leaked into the api image: %s' % bad) if bad else None"
 # Том для /app/data: там SQLite с never_renew, тратами и jar. Инструкцию
 # VOLUME не используем — часть билдеров её не поддерживает.
 EXPOSE 8000
+USER 10002:10002
 CMD ["uvicorn", "mktlink.api.app:factory", "--factory", \
      "--host", "0.0.0.0", "--port", "8000", \
      # 35 > RESPONSE_BUDGET_MAX_MS (30 с): keep-alive не влияет на запрос
