@@ -68,6 +68,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from time import monotonic
 from typing import Any, Final
 from urllib.parse import quote, urlsplit
 
@@ -111,13 +112,9 @@ SHORTEN_REQUIRED: Final[frozenset[str]] = frozenset({"ozon"})
 #: постфактум, когда запросы начали отказывать.
 CREDITS: Final[dict[str, int]] = {"ozon": 35, "ym": 10, "wb": 10}
 
-#: Потолок на сокращение. АБСОЛЮТНЫЙ, а не доля бюджета, и это исправление
-#: по живому прогону. Доля 25 % от 13.5 с забирала у самого запроса 3.4 с,
-#: и карточка Ozon не успевала: ``curl: (28) Operation timed out after
-#: 10126 milliseconds``. При этом ``clck.ru`` отвечает за доли секунды —
-#: доля здесь была не «страховкой», а прямым вычетом из того, чего не
-#: хватало.
-SHORTEN_CAP_MS: Final[int] = 1_500
+#: На VPS сокращение иногда превышает 1.5 с. Даём до 4 с, но из бюджета
+#: запроса вычитаем только фактически прошедшее время, а не весь потолок.
+SHORTEN_CAP_MS: Final[int] = 4_000
 
 #: Идентификатор «егресс не наш» для таблицы ``spacing``.
 #:
@@ -211,7 +208,7 @@ class ScrapeDoTransport:
     shorten_sender: Any = None
     #: Кэш коротких ссылок (:class:`~mktlink.store.shortlinks.OutboundShortlinks`
     #: или любой объект с ``get``/``put``). Без него всё работает, но каждый
-    #: запрос платит за сокращение полторы секунды из своего окна — а у
+    #: запрос платит за сокращение временем из своего окна — а у
     #: Ozon это разница между 200 и 202.
     shorten_cache: Any = None
     #: Атрибуция егресса. Читается :class:`~mktlink.egress.client.EgressClient`.
@@ -239,12 +236,13 @@ class ScrapeDoTransport:
             if self.shorten_cache is not None:
                 cached = self.shorten_cache.get(url, provider=self.shorten_via)
             if cached is not None:
-                # Попадание в кэш возвращает ступени полторы секунды её окна.
+                # Попадание в кэш исключает обращение к сокращателю.
                 target = cached
             else:
                 # Не больше потолка и не больше половины остатка: при совсем
                 # маленьком сроке сокращение не должно съесть весь запрос.
                 share = max(1, min(self.shorten_cap_ms, timeout_ms // 2))
+                started = monotonic()
                 try:
                     target = await shorten(
                         url,
@@ -257,7 +255,7 @@ class ScrapeDoTransport:
                 else:
                     if self.shorten_cache is not None:
                         self.shorten_cache.put(url, target, provider=self.shorten_via)
-                budget = timeout_ms - share
+                budget = max(1, timeout_ms - int((monotonic() - started) * 1000))
 
         req = api_url(target, token=self.token, marketplace=mp)
         status, body = await self._send(req, dict(ALLOW_REDIRECTS), max(1, budget))

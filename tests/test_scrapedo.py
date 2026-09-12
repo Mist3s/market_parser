@@ -140,8 +140,10 @@ async def test_ozon_goes_through_the_shortener_and_ym_does_not() -> None:
 
 
 @pytest.mark.asyncio
-async def test_shortening_takes_a_capped_slice_not_a_share() -> None:
-    """Регрессия: доля 25 % отнимала 3.4 с и Ozon не успевал."""
+async def test_shortening_deducts_elapsed_time_not_its_entire_cap(monkeypatch) -> None:
+    """Сокращателю доступно 4 с, но быстрый ответ не отнимает их у scrape.do."""
+    ticks = iter((100.0, 100.25))
+    monkeypatch.setattr("mktlink.egress.scrapedo.monotonic", lambda: next(ticks), raising=False)
     seen_req: list = []
     seen_short: list = []
     t = ScrapeDoTransport(
@@ -154,9 +156,8 @@ async def test_shortening_takes_a_capped_slice_not_a_share() -> None:
         "https://www.ozon.ru/product/x/",
         headers={}, proxy=None, impersonate=None, timeout_ms=13_500,
     )
-    assert seen_short[0]["timeout_ms"] == SHORTEN_CAP_MS
-    # Запросу осталось всё остальное, а не три четверти.
-    assert seen_req[0]["timeout_ms"] == 13_500 - SHORTEN_CAP_MS
+    assert seen_short[0]["timeout_ms"] == SHORTEN_CAP_MS == 4000
+    assert seen_req[0]["timeout_ms"] == 13_250
 
 
 @pytest.mark.asyncio
