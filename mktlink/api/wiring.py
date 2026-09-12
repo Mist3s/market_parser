@@ -306,18 +306,26 @@ def build_deps(settings: Settings | None = None, conn: sqlite3.Connection | None
     # через чужой сервис не должен включаться сам собой.
     api_client: EgressClient | None = None
     api_mps: frozenset[str] = frozenset()
+    direct_resolver = RedirectResolver(_fetch_hop, _resolve_dns)
+    api_resolver = None
     if cfg.scrapedo_configured:
         from mktlink.egress.scrapedo import ScrapeDoTransport  # noqa: PLC0415
         from mktlink.store.shortlinks import OutboundShortlinks  # noqa: PLC0415
 
-        api_client = EgressClient(
-            ScrapeDoTransport(
-                token=cfg.scrapedo_token or "",
-                shorten_via=cfg.scrapedo_shorten_via,
-                shorten_cache=OutboundShortlinks(c),
-            )
+        api_transport = ScrapeDoTransport(
+            token=cfg.scrapedo_token or "",
+            shorten_via=cfg.scrapedo_shorten_via,
+            shorten_cache=OutboundShortlinks(c),
         )
+        api_client = EgressClient(api_transport)
         api_mps = frozenset(cfg.scrapedo_marketplaces)
+        from mktlink.egress.resolve import ScrapeDoResolver  # noqa: PLC0415
+
+        api_resolver = ScrapeDoResolver(api_transport)
+
+    async def resolver(dl: Deadline, url: str, mp: str) -> tuple[str, int]:
+        selected = api_resolver if api_resolver is not None and mp in api_mps else direct_resolver
+        return await selected(dl, url, mp)
     return Deps(
         cache=ProductCache(c, redis=redis_layer),
         ladder=build_ladder(c, client, api_client=api_client, api_marketplaces=api_mps),
@@ -329,10 +337,7 @@ def build_deps(settings: Settings | None = None, conn: sqlite3.Connection | None
         # 0 означает «как модельный»: ручка есть, но выключаема одним нулём,
         # а не требует держать два согласованных числа.
         product_ttl_pinned_s=cfg.product_ttl_pinned_s or cfg.product_ttl_s,
-        # Требование 2 подключено здесь и только здесь. Раскрутка идёт прямым
-        # егрессом: каждый её хоп через прокси взял бы слот спейсинга, и при
-        # интервале Ozon в 5 с лестницы для короткой ссылки не осталось бы.
-        resolver=RedirectResolver(_fetch_hop, _resolve_dns),
+        resolver=resolver,
         budget_ms=cfg.response_budget_ms,
         ym_region_id=cfg.ym_region_id,
     )

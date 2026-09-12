@@ -203,6 +203,11 @@ async def _identify(
                 ) from None
             try:
                 resolved, hops = await deps.resolver(dl, url, m.marketplace)
+            except ScrapeDoError as exc:
+                response = _reject("capacity_exhausted", rid, url, marketplace=m.marketplace)
+                response[1].meta.reason = exc.reason
+                response[1].meta.degraded = True
+                raise _Rejected(response) from None
             except UnwindChallenged:
                 raise _Rejected(
                     _reject("unwind_challenged", rid, url, marketplace=m.marketplace)
@@ -259,25 +264,12 @@ async def _identify(
 async def resolve(
     req: ResolveRequest, deps: Deps, *, request_id: str | None = None
 ) -> tuple[int, ProductResponse]:
-    """Короткая ссылка -> каноническая. Ни одного запроса к карточке.
+    """Короткая ссылка -> каноническая; название и продавца не извлекаем.
 
-    Отдельный эндпоинт существует ради бюджета вызывающего: раскрутка стоит до
-    трёх хопов, а карточка — до 25 секунд и до 35 кредитов скрейпинг-API.
-    Клиент, который один раз развернул ссылку и сохранил канонический URL,
-    больше за раскрутку не платит НИКОГДА — ни временем, ни кредитами.
-
-    Ответ — тот же конверт ``ProductResponse``, но ``meta.source = "resolve"``
-    и все извлекаемые поля пусты. Это честно: мы не смотрели карточку, поэтому
-    ``product.name`` и ``seller`` здесь ``null`` не потому, что не нашли, а
-    потому что не искали. Отдельная схема ответа не вводится намеренно —
-    таксономия отказов у двух эндпоинтов одна и та же, и дублировать её
-    значило бы получить два расходящихся списка кодов.
+    С настроенным scrape.do переходы выполняет поставщик, включая рендеринг
+    Ozon. Полный URL кэшируется без срока. До 30 с на первый запрос.
     """
     rid = request_id or uuid.uuid4().hex
-    # Бюджет раскрутки не зависит от ручки ответа: тут нет ни лестницы, ни
-    # ступеней, только хопы. Потолок задан своим числом, чтобы 30 секунд,
-    # выведенные из времени карточки Ozon, не превращались в разрешение
-    # тридцать секунд гоняться за редиректами.
     budget = min(RESOLVE_BUDGET_MS, req.max_wait_ms or RESOLVE_BUDGET_MS)
     dl = Deadline.start(budget - 100, rid)
     token = bind(dl)

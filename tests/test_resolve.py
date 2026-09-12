@@ -101,10 +101,10 @@ async def test_ladder_is_never_touched(conn) -> None:
     assert code == 200
 
 
-async def test_budget_is_its_own_not_the_card_ceiling(conn) -> None:
+async def test_budget_allows_provider_rendering(conn) -> None:
     _, body = await resolve(ResolveRequest(url=YM_PDP), _deps(conn))
     assert body.meta.budget_ms == RESOLVE_BUDGET_MS
-    assert RESOLVE_BUDGET_MS < 15_000, "иначе раскрутка получила бы окно карточки"
+    assert RESOLVE_BUDGET_MS == 30_000
 
 
 async def test_bad_url_is_rejected_the_same_way_as_on_the_card(conn) -> None:

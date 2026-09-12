@@ -18,7 +18,7 @@ from __future__ import annotations
 import hashlib
 from typing import Protocol
 
-from mktlink.constants import REDIRECT_HOPS_MAX, RESOLVE_BUDGET_MS
+from mktlink.constants import DIRECT_UNWIND_MS, REDIRECT_HOPS_MAX
 from mktlink.timing.deadline import Deadline, stage
 from mktlink.urls.registry import UnknownHost, match_path, rule_for_host, unwind_eligible
 from mktlink.urls.ssrf import SsrfRejected, UnwindChallenged, check_path_veto, check_resolved
@@ -87,7 +87,7 @@ class RedirectResolver:
         started_ms = dl.elapsed_ms
         # 550 мс — оценка для планировщика, а не предел каждого живого соединения.
         # Весь путь, включая DNS, ограничен общим бюджетом раскрутки и запроса.
-        async with stage(dl, "unwind", cap_ms=RESOLVE_BUDGET_MS, reserve_ms=0) as budget_ms:
+        async with stage(dl, "unwind", cap_ms=DIRECT_UNWIND_MS, reserve_ms=0) as budget_ms:
             return await self._walk(dl, url, mp, started_ms, budget_ms)
 
     async def _walk(self, dl: Deadline, url: str, mp: str,
