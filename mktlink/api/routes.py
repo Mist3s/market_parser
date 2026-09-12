@@ -29,6 +29,7 @@ from mktlink.api.schemas import (
 )
 from mktlink.budget import BudgetTooSmall, plan
 from mktlink.constants import BUDGET_FLOOR_MS, RESOLVE_BUDGET_MS
+from mktlink.egress.scrapedo import ScrapeDoError
 from mktlink.marketplaces.verdict import USABLE, SellerStatus, Verdict
 from mktlink.store.cache import FRESH_TTL_PINNED_S, FRESH_TTL_S
 from mktlink.timing.deadline import Deadline, DeadlineExceeded, bind, unbind
@@ -206,11 +207,12 @@ async def _identify(
                 raise _Rejected(
                     _reject("unwind_challenged", rid, url, marketplace=m.marketplace)
                 ) from None
-            except DeadlineExceeded:
+            except DeadlineExceeded as exc:
                 # Канонический URL так и не получен — единственный случай,
                 # когда 504 отдаётся без него.
                 raise _Rejected(
-                    _reject("deadline_exceeded", rid, url, marketplace=m.marketplace)
+                    _reject("deadline_exceeded", rid, url, marketplace=m.marketplace,
+                            detail={"stage": exc.stage_name, "elapsed_ms": dl.elapsed_ms})
                 ) from None
             except SsrfRejected as exc:
                 # Редирект увёл на приватный адрес. Это отказ ВХОДА: ссылка
@@ -363,6 +365,8 @@ async def _run(
         ex = await deps.ladder(dl, c, budget)
     except DeadlineExceeded:
         ex = Extraction(verdict=Verdict.BUDGET_EXHAUSTED, reason="deadline_exhausted")
+    except ScrapeDoError as exc:
+        ex = Extraction(verdict=Verdict.UPSTREAM_ERROR, reason=exc.reason)
     except BudgetTooSmall as exc:
         # Второй перехват — не паранойя, а закрытие проверенного дефекта.
         # Предпроверка выше смотрит ОДНУ лестницу, а лестница внутри может
@@ -405,6 +409,10 @@ async def _run(
             resp.meta.degraded = True
             resp.meta.detail["age_s"] = age
             return 200, resp
+
+    if ex.reason in ("provider_error", "provider_domain_disabled", "shortener_unavailable"):
+        return 503, _envelope("capacity_exhausted", rid, req.url, c, hops, budget, dl,
+                              reason=ex.reason, degraded=True)
 
     return _pending(
         rid, req.url, c, hops, budget, dl, reason=_reason_for(ex), verdict=ex.verdict

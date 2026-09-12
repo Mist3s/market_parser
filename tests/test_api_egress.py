@@ -61,6 +61,24 @@ async def _run(conn, client, url: str = OZON_PDP):
     return await handle(ProductRequest(url=url), deps, request_id="r1")
 
 
+@pytest.mark.parametrize("status,message,reason", [
+    (400, "We disabled the target domain for free packages", "provider_domain_disabled"),
+    (401, "invalid token", "provider_error"),
+])
+async def test_provider_refusal_is_a_named_response_not_an_unhandled_500(
+    conn, status, message, reason,
+):
+    import json
+
+    code, body = await _run(conn, _api_client(status, json.dumps({"Message": [message]})))
+    assert code == 503
+    assert body.status == "capacity_exhausted"
+    assert body.meta.reason == reason
+    assert body.url.canonical is not None
+    assert message not in body.model_dump_json()
+    assert conn.execute("SELECT count(*) FROM proxy_health").fetchone()[0] == 0
+
+
 # --- предикат ------------------------------------------------------------------
 
 

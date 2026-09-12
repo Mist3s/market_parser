@@ -103,10 +103,15 @@ async def shorten(
     """
     if timeout_ms <= 0:
         raise ShortenFailed("no time left to shorten")
-    if provider == "clck":
-        return await _clck(url, timeout_ms, sender)
-    if provider == "goo":
-        return await _goo(url, timeout_ms, sender)
+    from curl_cffi.requests.exceptions import RequestException  # noqa: PLC0415
+
+    try:
+        if provider == "clck":
+            return await _clck(url, timeout_ms, sender)
+        if provider == "goo":
+            return await _goo(url, timeout_ms, sender)
+    except RequestException:
+        raise ShortenFailed("shortener transport failed") from None
     raise ShortenFailed(f"unknown shortener {provider!r}")
 
 

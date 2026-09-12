@@ -272,17 +272,21 @@ async def _resolve_dns(host: str) -> list[str]:
 async def _fetch_hop(url: str, timeout_ms: int) -> tuple[int, str | None]:
     """Один хоп раскрутки. Прямой егресс, без прокси, без автоследования."""
     from curl_cffi.requests import AsyncSession  # noqa: PLC0415
+    from curl_cffi.requests.exceptions import Timeout  # noqa: PLC0415
 
     from mktlink.urls.redirects import HOP_HEADERS  # noqa: PLC0415
 
-    async with AsyncSession(trust_env=False) as s:
-        r = await s.get(
-            url,
-            headers=HOP_HEADERS,
-            timeout=timeout_ms / 1000,
-            allow_redirects=False,
-        )
-        return r.status_code, r.headers.get("Location")
+    try:
+        async with AsyncSession(trust_env=False) as s:
+            r = await s.get(
+                url,
+                headers=HOP_HEADERS,
+                timeout=timeout_ms / 1000,
+                allow_redirects=False,
+            )
+            return r.status_code, r.headers.get("Location")
+    except Timeout:
+        raise DeadlineExceeded("unwind_transport") from None
 
 
 def build_deps(settings: Settings | None = None, conn: sqlite3.Connection | None = None) -> Deps:

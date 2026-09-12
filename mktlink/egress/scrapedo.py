@@ -157,6 +157,8 @@ class ScrapeDoError(RuntimeError):
     разные события, и смешивать их значит искать причину не там.
     """
 
+    reason = "provider_error"
+
 
 class DomainDisabled(ScrapeDoError):
     """Целевой домен закрыт на текущем тарифе.
@@ -166,6 +168,14 @@ class DomainDisabled(ScrapeDoError):
     тип, потому что лечится он ровно двумя способами — оплатой тарифа или
     сокращением ссылки, — и ни один из них не является повтором запроса.
     """
+
+    reason = "provider_domain_disabled"
+
+
+class ShortenerUnavailable(ScrapeDoError):
+    """Обязательное сокращение не выполнено; прямой URL поставщику не отправляется."""
+
+    reason = "shortener_unavailable"
 
 
 def marketplace_of(url: str) -> str | None:
@@ -243,10 +253,7 @@ class ScrapeDoTransport:
                         sender=self.shorten_sender,
                     )
                 except ShortenFailed:
-                    # Сокращение не удалось — идём прямым URL. Он, скорее всего,
-                    # получит DomainDisabled, и это правильный исход: он назовёт
-                    # настоящую причину вместо того, чтобы молча вернуть пусто.
-                    target = url
+                    raise ShortenerUnavailable("required URL shortening failed") from None
                 else:
                     if self.shorten_cache is not None:
                         self.shorten_cache.put(url, target, provider=self.shorten_via)
@@ -304,7 +311,7 @@ def _interpret(status: int, body: str) -> tuple[int, str]:
     * ``200`` с телом — ответ маркетплейса. Отдаётся как есть.
     """
     if status == 400 and "disabled the target domain" in body:
-        raise DomainDisabled(body[:300])
+        raise DomainDisabled("target domain disabled by provider")
     if status == 310 or (body[:1] == "{" and "Redirect error" in body):
         raise ScrapeDoError(f"provider stopped at redirect: {body[:200]}")
     if status >= 400 and body[:1] == "{":

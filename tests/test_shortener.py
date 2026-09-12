@@ -10,6 +10,17 @@ import pytest
 from mktlink.egress.shortener import PROVIDERS, ShortenFailed, shorten
 
 
+async def test_transport_timeout_is_a_shortener_failure_without_response_content():
+    from curl_cffi.requests.exceptions import Timeout
+
+    async def timeout(url, **kwargs):
+        raise Timeout("sensitive request data")
+
+    with pytest.raises(ShortenFailed) as error:
+        await shorten("https://www.ozon.ru/product/x/", sender=timeout)
+    assert "sensitive" not in str(error.value)
+
+
 def _sender(status: int, body: str, seen: list | None = None):
     async def send(url, *, timeout_ms, **kw):
         if seen is not None:

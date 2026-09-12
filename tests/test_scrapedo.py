@@ -176,19 +176,21 @@ async def test_tiny_budget_never_lets_shortening_eat_everything() -> None:
 
 
 @pytest.mark.asyncio
-async def test_failed_shortening_falls_back_to_the_direct_url() -> None:
-    """Сокращалка молчит — идём прямым URL и получаем НАСТОЯЩУЮ причину."""
+async def test_failed_required_shortening_does_not_send_the_direct_url() -> None:
     async def broken(url, *, timeout_ms, **kw):
         return 200, "Error, database insert failed"
 
+    seen = []
     t = ScrapeDoTransport(
-        token="T", shorten_via="clck", sender=_sender(400, DISABLED), shorten_sender=broken
+        token="T", shorten_via="clck", sender=_sender(400, DISABLED, seen), shorten_sender=broken
     )
-    with pytest.raises(DomainDisabled):
+    with pytest.raises(ScrapeDoError) as error:
         await t(
             "https://www.ozon.ru/product/x/",
             headers={}, proxy=None, impersonate=None, timeout_ms=5_000,
         )
+    assert error.value.reason == "shortener_unavailable"
+    assert seen == []
 
 
 # --- перевод отказов поставщика -------------------------------------------------

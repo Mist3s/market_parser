@@ -51,6 +51,15 @@ restrict,command="/usr/local/bin/mktlink-deploy" ssh-ed25519 <public-key> mktlin
 `api_key` включает авторизацию mktlink; в этом случае соответствующий ключ нужно задать
 в серверном `PILCHAI_MKTLINK_API_KEY` и перезапустить потребитель.
 
+Для Ozon в этой поставке задаётся `MKTLINK_SCRAPEDO_SHORTEN_VIA=clck`: полная ссылка сначала
+сокращается, затем передаётся в scrape.do. При отказе сокращателя прямой URL не отправляется.
+Яндекс.Маркет через сокращатель не проходит. После изменения `mktlink.env` из `/opt/mktlink`
+выполните `docker compose --env-file .image up -d --wait mktlink`: `.image` содержит тег образа.
+Отказы поставщика возвращаются как 503 с `meta.reason=provider_domain_disabled`,
+`provider_error` или `shortener_unavailable`, без необработанного исключения и тела поставщика.
+Разворачивание входящей короткой ссылки использует общий бюджет до 4 с, включая DNS,
+а не жёсткие 550 мс на каждый переход; блокировка остаётся отдельным `unwind_challenged`.
+
 ## Порядок запуска и проверка
 
 1. Выполнить bootstrap и настроить secrets Actions.

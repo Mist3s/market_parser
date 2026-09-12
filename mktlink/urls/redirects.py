@@ -18,7 +18,7 @@ from __future__ import annotations
 import hashlib
 from typing import Protocol
 
-from mktlink.constants import HOP_MS, REDIRECT_HOPS_MAX
+from mktlink.constants import REDIRECT_HOPS_MAX, RESOLVE_BUDGET_MS
 from mktlink.timing.deadline import Deadline, stage
 from mktlink.urls.registry import UnknownHost, match_path, rule_for_host, unwind_eligible
 from mktlink.urls.ssrf import SsrfRejected, UnwindChallenged, check_path_veto, check_resolved
@@ -84,6 +84,14 @@ class RedirectResolver:
 
     async def __call__(self, dl: Deadline, url: str, mp: str) -> tuple[str, int]:
         """Раскрутить до канонического URL. Возвращает (url, число хопов)."""
+        started_ms = dl.elapsed_ms
+        # 550 мс — оценка для планировщика, а не предел каждого живого соединения.
+        # Весь путь, включая DNS, ограничен общим бюджетом раскрутки и запроса.
+        async with stage(dl, "unwind", cap_ms=RESOLVE_BUDGET_MS, reserve_ms=0) as budget_ms:
+            return await self._walk(dl, url, mp, started_ms, budget_ms)
+
+    async def _walk(self, dl: Deadline, url: str, mp: str,
+                    started_ms: int, budget_ms: int) -> tuple[str, int]:
         visited: set[str] = set()
         current = url
         hops = 0
@@ -129,9 +137,12 @@ class RedirectResolver:
             if self._dns is not None:
                 check_resolved(await self._dns(parsed.host))
 
-            async with stage(dl, f"unwind{hops}", cap_ms=HOP_MS, reserve_ms=0):
-                status, location = await self._fetch(current, HOP_MS)
+            remaining = max(0, budget_ms - (dl.elapsed_ms - started_ms))
+            async with stage(dl, f"unwind{hops}", cap_ms=remaining, reserve_ms=0) as hop_ms:
+                status, location = await self._fetch(current, hop_ms)
 
+            if status in (403, 429):
+                raise UnwindChallenged(current, egress="direct")
             if status not in REDIRECT_CODES or not location:
                 raise NotARedirect(f"{current} answered {status}")
 

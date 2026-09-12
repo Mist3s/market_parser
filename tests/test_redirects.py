@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
+
 import pytest
 
 from mktlink.constants import REDIRECT_HOPS_MAX
-from mktlink.timing.deadline import Deadline
+from mktlink.timing.deadline import Deadline, DeadlineExceeded
 from mktlink.urls.redirects import (
     CrossedMarketplace,
     NotARedirect,
@@ -139,3 +142,31 @@ async def test_hops_are_budget_stages() -> None:
 async def test_shortlink_key_is_stable_and_distinct() -> None:
     assert shortlink_key(OZON_SHORT) == shortlink_key(OZON_SHORT)
     assert shortlink_key(OZON_SHORT) != shortlink_key(YM_SHORT)
+
+
+async def test_one_slow_hop_can_use_the_remaining_resolve_budget():
+    async def slow(url, timeout_ms):
+        await asyncio.sleep(0.65)
+        return 302, OZON_PDP
+
+    resolved, hops = await RedirectResolver(slow, dns_ok())(
+        Deadline.start(3900, "slow-hop"), OZON_SHORT, "ozon")
+    assert (resolved, hops) == (OZON_PDP, 1)
+
+
+async def test_dns_is_inside_the_request_deadline():
+    async def slow_dns(host):
+        await asyncio.sleep(0.3)
+        return ["93.158.134.3"]
+
+    dl = Deadline.start(30, "slow-dns")
+    started = time.monotonic()
+    with pytest.raises(DeadlineExceeded):
+        await RedirectResolver(chain((302, OZON_PDP)), slow_dns)(dl, OZON_SHORT, "ozon")
+    assert time.monotonic() - started < 0.2
+
+
+async def test_direct_403_is_a_challenge_not_a_bad_product_url():
+    with pytest.raises(UnwindChallenged):
+        await RedirectResolver(chain((403, None)), dns_ok())(
+            Deadline.start(3900, "blocked"), OZON_SHORT, "ozon")
