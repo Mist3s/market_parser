@@ -44,6 +44,9 @@ TABLE: Final[dict[str, int]] = {
     #: и говорить ему обратное — врать.
     "unwind_challenged": 504,
     "job_unknown": 404,
+    #: Обычный магазин, которого нет в реестре. Виноват вход: ссылка вне
+    #: скоупа, и повтором это не лечится — нужна строка в реестре.
+    "shop_not_supported": 422,
 }
 
 #: Retry-After по причине. Каждое значение выведено из работы, которую ждут,
@@ -73,6 +76,13 @@ RETRY_AFTER: Final[dict[str, int]] = {
     # Отдаём максимум, который у нас есть, честно понимая, что это условность.
     "layout_changed": RETRY_AFTER_MINT_S,
     "needs_render": RETRY_AFTER_MINT_S,
+    # Обычные магазины. Блок и недоступность ждут долго: повтор через 3 с
+    # почти наверняка получит то же самое. Ошибка 5xx — коротко: сайт
+    # обычно поднимается быстро. Слишком большое тело повтором не лечится.
+    "shop_blocked": RETRY_AFTER_MINT_S,
+    "shop_unreachable": RETRY_AFTER_MINT_S,
+    "shop_error": RETRY_AFTER_FETCH_S,
+    "body_too_large": RETRY_AFTER_MINT_S,
 }
 
 

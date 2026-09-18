@@ -28,10 +28,14 @@ from mktlink.api.schemas import (
     ProductRequest,
     ProductResponse,
     ResolveRequest,
+    ShopMetaBlock,
+    ShopRequest,
+    ShopResponse,
     UrlBlock,
 )
 from mktlink.constants import GLOBAL_SEMAPHORE, RETRY_AFTER_SHED_S
 from mktlink.settings import Settings
+from mktlink.shops.service import ShopDeps, handle_shop
 
 #: Дефолт GET-формы держится в одном месте со схемой: раньше здесь стояло
 #: 900, а в схеме — своё значение, и две формы одного эндпоинта отвечали
@@ -81,7 +85,7 @@ def factory() -> Any:
     кто-то не вспомнит про отдельный флаг. Проверка по факту наличия ключей
     делает включение наблюдаемым: добавили ключ — доступ закрылся.
     """
-    from mktlink.api.wiring import build_deps  # noqa: PLC0415
+    from mktlink.api.wiring import build_deps, build_shop_deps  # noqa: PLC0415
 
     cfg = Settings()
     deps = build_deps(cfg)
@@ -93,19 +97,30 @@ def factory() -> Any:
         keys = conn.execute("SELECT count(*) AS n FROM api_key").fetchone()
         if keys is not None and int(keys["n"]) > 0:
             admission = Admission(conn)
-    return create_app(deps, cfg, admission)
+    shop_deps = build_shop_deps(cfg, conn, redis=getattr(deps.cache, "_redis", None))
+    return create_app(deps, cfg, admission, shop_deps=shop_deps)
 
 
 def create_app(
     deps: Deps,
     settings: Settings | None = None,
     admission: Any | None = None,
+    *,
+    shop_deps: ShopDeps | None = None,
 ) -> Any:
     from fastapi import FastAPI, Header, Query, Request  # noqa: PLC0415
     from fastapi.responses import JSONResponse  # noqa: PLC0415
 
     cfg = settings or Settings()
     gate = asyncio.Semaphore(GLOBAL_SEMAPHORE)
+    if shop_deps is None:
+        # Без явных зависимостей эндпоинт магазинов работает на кэше в памяти
+        # и настоящем егрессе: тесты пути маркетплейсов его не трогают, а
+        # прод собирает свои через build_shop_deps.
+        from mktlink.shops.fetch import ShopFetcher  # noqa: PLC0415
+        from mktlink.store.cache import ProductCache  # noqa: PLC0415
+
+        shop_deps = ShopDeps(cache=ProductCache(), fetcher=ShopFetcher())
 
     @asynccontextmanager
     async def lifespan(_: Any) -> AsyncIterator[None]:
@@ -243,6 +258,105 @@ def create_app(
         return JSONResponse(
             status_code=code, content=body.model_dump(mode="json"), headers=headers
         )
+
+    async def _serve_shop(req: ShopRequest, rid: str, api_key: str | None) -> JSONResponse:
+        """Карточка обычного магазина: название чая и магазина.
+
+        Учёт тот же, что у карточки маркетплейса, — списать по худшему
+        сценарию до работы и вернуть переплату по факту, — но худший
+        сценарий дешевле: ``shop_cold`` — один прямой запрос с нашего адреса
+        без прокси и без кредитов поставщика. Гейт ёмкости общий: сокет и
+        память здесь те же, что у маркетплейсов.
+        """
+        key = None
+        if admission is not None:
+            from mktlink.api.apikey import RateLimited, Unauthorized  # noqa: PLC0415
+
+            try:
+                key = admission.authenticate(api_key)
+                admission.charge(key, "shop_cold")
+            except Unauthorized:
+                return _deny_shop("unauthorized", rid, req.url, None)
+            except RateLimited as exc:
+                return _deny_shop("rate_limited", rid, req.url, exc.retry_after_s)
+
+        if gate.locked():
+            return _deny_shop(
+                "capacity_exhausted", rid, req.url, RETRY_AFTER_SHED_S, reason="capacity"
+            )
+
+        async with gate:
+            code, body = await handle_shop(req, shop_deps, request_id=rid)
+
+        if admission is not None and key is not None:
+            actual = {
+                "ok": "cache_hit" if body.meta.cache == "hit" else "shop_cold",
+                "stale": "stale",
+                "invalid_url": "invalid_url",
+                "not_a_product_url": "invalid_url",
+                "shop_not_supported": "unsupported_marketplace",
+                "host_not_allowed": "unsupported_marketplace",
+            }.get(body.status, "shop_cold")
+            admission.refund(key, COST["shop_cold"], actual)
+
+        headers = {"X-Request-Id": rid}
+        if body.meta.retry_after_seconds is not None:
+            headers["Retry-After"] = str(body.meta.retry_after_seconds)
+        if body.status in ("ok", "stale"):
+            headers["Cache-Control"] = "no-store"
+        return JSONResponse(
+            status_code=code, content=body.model_dump(mode="json"), headers=headers
+        )
+
+    def _deny_shop(
+        status: str,
+        rid: str,
+        url: str,
+        retry_after: int | None,
+        *,
+        reason: str | None = None,
+        detail: dict[str, Any] | None = None,
+    ) -> JSONResponse:
+        body = ShopResponse(
+            status=status,  # type: ignore[arg-type]
+            request_id=rid,
+            url=UrlBlock(submitted=url),
+            meta=ShopMetaBlock(
+                reason=reason, retry_after_seconds=retry_after, detail=detail or {}
+            ),
+        )
+        headers = {"X-Request-Id": rid}
+        if retry_after is not None:
+            headers["Retry-After"] = str(retry_after)
+        return JSONResponse(
+            status_code=http_for(status), content=body.model_dump(mode="json"), headers=headers
+        )
+
+    @app.post("/v1/shop")
+    async def post_shop(
+        req: ShopRequest,
+        x_request_id: str | None = Header(default=None),
+        x_api_key: str | None = Header(default=None),
+    ) -> Any:
+        return await _serve_shop(req, _rid(x_request_id), x_api_key)
+
+    @app.get("/v1/shop")
+    async def get_shop(
+        url: str = Query(...),
+        max_wait_ms: int | None = Query(default=None),
+        max_stale_s: int = Query(default=ShopRequest.model_fields["max_stale_s"].default),
+        force_refresh: bool = Query(default=False),
+        x_request_id: str | None = Header(default=None),
+        x_api_key: str | None = Header(default=None),
+    ) -> Any:
+        try:
+            req = ShopRequest(
+                url=url, max_wait_ms=max_wait_ms, max_stale_s=max_stale_s,
+                force_refresh=force_refresh,
+            )
+        except ValidationError as exc:
+            return _deny_shop("invalid_budget", _rid(x_request_id), url, None, detail=_first(exc))
+        return await _serve_shop(req, _rid(x_request_id), x_api_key)
 
     @app.post("/v1/resolve")
     async def post_resolve(

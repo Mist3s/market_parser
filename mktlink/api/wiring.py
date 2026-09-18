@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from mktlink.api.routes import Deps, Extraction
 from mktlink.budget import stage_reserve_ms
@@ -25,6 +26,9 @@ from mktlink.settings import Settings
 from mktlink.store.cache import ProductCache
 from mktlink.timing.deadline import Deadline, DeadlineExceeded
 from mktlink.urls.canonical import Canonical
+
+if TYPE_CHECKING:
+    from mktlink.shops.service import ShopDeps
 
 #: Маркетплейсы, где cookie — ПРЕДУСЛОВИЕ, а не обогащение.
 #:
@@ -287,6 +291,40 @@ async def _fetch_hop(url: str, timeout_ms: int) -> tuple[int, str | None]:
             return r.status_code, r.headers.get("Location")
     except Timeout:
         raise DeadlineExceeded("unwind_transport") from None
+
+
+def build_shop_deps(
+    settings: Settings | None = None,
+    conn: sqlite3.Connection | None = None,
+    *,
+    redis: Any = None,
+) -> ShopDeps:
+    """Зависимости ``/v1/shop``: тот же кэш и тот же пул прокси, свой егресс.
+
+    Прокси здесь — фолбэк, а не путь: замер в :mod:`mktlink.shops.fetch`
+    показал, что магазины отвечают напрямую. Аренда берётся лениво и только
+    когда прямой ответ похож на блок, поэтому пустой пул ничего не ломает.
+    """
+    cfg = settings or Settings()
+    from mktlink.shops.fetch import ShopFetcher  # noqa: PLC0415
+    from mktlink.shops.service import ShopDeps  # noqa: PLC0415
+
+    proxy_for = None
+    if conn is not None and cfg.shop_proxy_fallback:
+        pool = PoolView(conn)
+
+        def proxy_for() -> str | None:
+            lease = pool.lease()
+            return lease.proxy_url if lease is not None else None
+
+    return ShopDeps(
+        cache=ProductCache(conn, redis=redis),
+        fetcher=ShopFetcher(proxy_for=proxy_for),
+        budget_ms=cfg.shop_budget_ms,
+        ttl_s=cfg.shop_ttl_s,
+        allow_unknown_hosts=cfg.shop_allow_unknown_hosts,
+        resolve_dns=_resolve_dns,
+    )
 
 
 def build_deps(settings: Settings | None = None, conn: sqlite3.Connection | None = None) -> Deps:

@@ -14,6 +14,9 @@ from mktlink.constants import (
     RESPONSE_BUDGET_DEFAULT_MS,
     RESPONSE_BUDGET_MAX_MS,
     RESPONSE_BUDGET_MIN_MS,
+    SHOP_BUDGET_DEFAULT_MS,
+    SHOP_BUDGET_FLOOR_MS,
+    SHOP_TTL_S,
 )
 
 
@@ -119,6 +122,21 @@ class Settings(BaseSettings):
     #: Недоступный Redis НЕ является отказом: см.
     #: :mod:`mktlink.store.rediscache`.
     redis_url: str | None = None
+
+    # --- обычные магазины (/v1/shop) ----------------------------------------------
+    #: Бюджет ответа для карточки обычного магазина. Отдельный от
+    #: маркетплейсного: здесь один прямой запрос, а не лестница.
+    shop_budget_ms: int = Field(
+        default=SHOP_BUDGET_DEFAULT_MS, ge=SHOP_BUDGET_FLOOR_MS, le=RESPONSE_BUDGET_MAX_MS
+    )
+    #: Свежесть названия. Название не меняется, дефолт — неделя (горизонт).
+    shop_ttl_s: int = Field(default=SHOP_TTL_S, ge=0, le=CACHE_STALE_HORIZON_S)
+    #: Пускать ли хосты, которых нет в реестре. ВЫКЛЮЧЕНО по умолчанию: без
+    #: allowlist'а эндпоинт — открытый прокси для чужих запросов. С флагом
+    #: незнакомый хост проходит SSRF-проверку и читается общим экстрактором.
+    shop_allow_unknown_hosts: bool = False
+    #: Повторять ли заблокированный прямой запрос через прокси из пула.
+    shop_proxy_fallback: bool = True
 
     # --- эксплуатация --------------------------------------------------------
     log_level: str = "INFO"

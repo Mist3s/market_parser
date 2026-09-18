@@ -16,6 +16,8 @@ from mktlink.constants import (
     BUDGET_FLOOR_MS,
     RESOLVE_BUDGET_MS,
     RESPONSE_BUDGET_MAX_MS,
+    SHOP_BUDGET_FLOOR_MS,
+    SHOP_TTL_S,
 )
 
 Status = Literal[
@@ -173,3 +175,76 @@ class ProductResponse(BaseModel):
     seller: SellerBlock = Field(default_factory=SellerBlock)
     offer: OfferBlock = Field(default_factory=OfferBlock)
     meta: MetaBlock = Field(default_factory=MetaBlock)
+
+
+# --- обычные магазины: /v1/shop ---------------------------------------------------
+
+ShopStatus = Literal[
+    "ok",
+    "stale",
+    "pending",
+    "not_found",
+    "invalid_url",
+    "invalid_budget",
+    "host_not_allowed",
+    "not_a_product_url",
+    "shop_not_supported",
+    "deadline_exceeded",
+    "unauthorized",
+    "rate_limited",
+    "capacity_exhausted",
+]
+
+
+class ShopRequest(BaseModel):
+    """Вход ``/v1/shop``. Те же три ручки, что у карточки маркетплейса.
+
+    ``max_stale_s`` по умолчанию — неделя, а не сутки: в ответе одно поле,
+    название, и оно не устаревает. Разрешать старое по умолчанию здесь
+    безопасно, а запрет остаётся за клиентом (``0``).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: Annotated[str, Field(min_length=12, max_length=2048)]
+    max_wait_ms: (
+        Annotated[int, Field(ge=SHOP_BUDGET_FLOOR_MS, le=RESPONSE_BUDGET_MAX_MS)] | None
+    ) = None
+    max_stale_s: Annotated[int, Field(ge=0, le=SHOP_TTL_S)] = SHOP_TTL_S
+    force_refresh: bool = False
+
+
+class ShopBlock(BaseModel):
+    host: str | None = None
+    #: Имя магазина из реестра; для незнакомого хоста — ``og:site_name`` или хост.
+    name: str | None = None
+    #: CMS для диагностики: bitrix, tilda, opencart… На разбор не влияет.
+    platform: str | None = None
+
+
+class ShopProductBlock(BaseModel):
+    name: str | None = None
+    #: Откуда взято название: h1, ldjson, og:title, microdata, title.
+    source: str | None = None
+
+
+class ShopMetaBlock(BaseModel):
+    budget_ms: int = 0
+    elapsed_ms: int = 0
+    cache: Literal["hit", "miss", "stale"] = "miss"
+    degraded: bool = False
+    reason: str | None = None
+    retry_after_seconds: int | None = None
+    #: ``direct`` или ``proxy`` — через что прочитана страница.
+    egress: str | None = None
+    ledger: list[tuple[str, int]] = Field(default_factory=list)
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+
+class ShopResponse(BaseModel):
+    status: ShopStatus
+    request_id: str
+    url: UrlBlock
+    shop: ShopBlock = Field(default_factory=ShopBlock)
+    product: ShopProductBlock = Field(default_factory=ShopProductBlock)
+    meta: ShopMetaBlock = Field(default_factory=ShopMetaBlock)
