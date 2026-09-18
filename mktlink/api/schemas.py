@@ -235,7 +235,8 @@ class ShopMetaBlock(BaseModel):
     degraded: bool = False
     reason: str | None = None
     retry_after_seconds: int | None = None
-    #: ``direct`` или ``proxy`` — через что прочитана страница.
+    #: Через что прочитана страница: ``direct``, ``proxy`` (пул) или ``api``
+    #: (scrape.do, 1 кредит поставщика).
     egress: str | None = None
     ledger: list[tuple[str, int]] = Field(default_factory=list)
     detail: dict[str, Any] = Field(default_factory=dict)

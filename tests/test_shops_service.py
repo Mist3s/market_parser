@@ -341,3 +341,17 @@ def _matches(url: str, fixture: str) -> bool:
     if fixture == "moschaitorg.ru-kenya":
         return "opa712" in url
     return True
+
+
+async def test_silent_host_is_read_through_the_provider() -> None:
+    """Хост молчит на TLS с нашего адреса — карточка приходит через scrape.do."""
+
+    async def provider(url: str, *, timeout_ms: int) -> tuple[int, str, str]:
+        return 200, PAGE, url
+
+    t = Transport(ShopUnreachable("connect_timeout"))
+    d = ShopDeps(cache=ProductCache(), fetcher=ShopFetcher(t, provider=provider))
+    code, r = await handle_shop(ShopRequest(url=MOYCHAY), d)
+    assert (code, r.status, r.meta.egress) == (200, "ok", "api")
+    assert r.product.name == "Шен пуэр Мэнхай Лао, 2012"
+    assert [name for name, _ in r.meta.ledger] == ["shop.fetch", "shop.fetch_api"]

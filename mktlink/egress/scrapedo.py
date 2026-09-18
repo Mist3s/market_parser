@@ -181,8 +181,25 @@ def marketplace_of(url: str) -> str | None:
 
 def api_url(target: str, *, token: str, marketplace: str) -> str:
     """Собрать URL вызова поставщика."""
+    return _build(target, token, PARAMS[marketplace])
+
+
+#: Обычный магазин (``/v1/shop``): российский датацентровый адрес, без рендера
+#: и без ``super`` — самый дешёвый тариф, 1 кредит. ЗАМЕР 2026-09-18 с VPS:
+#: moychay.ru, который с адреса VPS молчит на TLS, через этот путь отдал
+#: карточку целиком (635 KiB, ``<h1>`` на месте) за 1.2 с.
+SHOP_PARAMS: Final[dict[str, str]] = {"geoCode": "ru"}
+SHOP_CREDITS: Final[int] = 1
+
+
+def shop_api_url(target: str, *, token: str) -> str:
+    """URL вызова поставщика для карточки обычного магазина."""
+    return _build(target, token, SHOP_PARAMS)
+
+
+def _build(target: str, token: str, params: dict[str, str]) -> str:
     parts = [f"token={quote(token, safe='')}", f"url={quote(target, safe='')}"]
-    parts += [f"{k}={quote(v, safe='')}" for k, v in PARAMS[marketplace].items()]
+    parts += [f"{k}={quote(v, safe='')}" for k, v in params.items()]
     return API + "?" + "&".join(parts)
 
 
@@ -322,6 +339,10 @@ def _interpret(status: int, body: str) -> tuple[int, str]:
     return status, body
 
 
+#: Публичное имя той же интерпретации для обходного пути магазинов.
+interpret = _interpret
+
+
 __all__ = [
     "ALLOW_REDIRECTS",
     "API",
@@ -331,9 +352,13 @@ __all__ = [
     "SHORTEN_CAP_MS",
     "SHORTEN_REQUIRED",
     "PARAMS",
+    "SHOP_CREDITS",
+    "SHOP_PARAMS",
     "DomainDisabled",
     "ScrapeDoError",
     "ScrapeDoTransport",
     "api_url",
+    "interpret",
     "marketplace_of",
+    "shop_api_url",
 ]

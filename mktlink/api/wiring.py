@@ -299,27 +299,35 @@ def build_shop_deps(
     *,
     redis: Any = None,
 ) -> ShopDeps:
-    """Зависимости ``/v1/shop``: тот же кэш и тот же пул прокси, свой егресс.
+    """Зависимости ``/v1/shop``: тот же кэш, тот же пул прокси и тот же
+    поставщик, свой егресс.
 
-    Прокси здесь — фолбэк, а не путь: замер в :mod:`mktlink.shops.fetch`
-    показал, что магазины отвечают напрямую. Аренда берётся лениво и только
-    когда прямой ответ похож на блок, поэтому пустой пул ничего не ломает.
+    Обход — фолбэк, а не путь: прямой запрос бесплатен и работает там, где
+    сеть VPS не отфильтрована (замеры в :mod:`mktlink.shops.fetch`). Аренда
+    прокси берётся лениво, поэтому пустой пул ничего не ломает; без прокси
+    обход идёт через scrape.do за 1 кредит, если токен задан. Один флаг
+    ``shop_proxy_fallback`` выключает оба обхода.
     """
     cfg = settings or Settings()
-    from mktlink.shops.fetch import ShopFetcher  # noqa: PLC0415
+    from mktlink.shops.fetch import ScrapeDoRoute, ShopFetcher  # noqa: PLC0415
     from mktlink.shops.service import ShopDeps  # noqa: PLC0415
 
     proxy_for = None
-    if conn is not None and cfg.shop_proxy_fallback:
-        pool = PoolView(conn)
+    provider = None
+    if cfg.shop_proxy_fallback:
+        if conn is not None:
+            pool = PoolView(conn)
 
-        def proxy_for() -> str | None:
-            lease = pool.lease()
-            return lease.proxy_url if lease is not None else None
+            def proxy_for() -> str | None:
+                lease = pool.lease()
+                return lease.proxy_url if lease is not None else None
+
+        if cfg.scrapedo_token:
+            provider = ScrapeDoRoute(token=cfg.scrapedo_token)
 
     return ShopDeps(
         cache=ProductCache(conn, redis=redis),
-        fetcher=ShopFetcher(proxy_for=proxy_for),
+        fetcher=ShopFetcher(proxy_for=proxy_for, provider=provider),
         budget_ms=cfg.shop_budget_ms,
         ttl_s=cfg.shop_ttl_s,
         allow_unknown_hosts=cfg.shop_allow_unknown_hosts,
