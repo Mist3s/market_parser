@@ -87,6 +87,11 @@ LEDGER = {
     (15000, "wb", 0): ((1200, 1800, 1400), (2000, 2000), 5815),
     (5000, "ym", 0): ((2600,), (), 1475),
     (15000, "ym", 0): ((2600, 2400, 2600, 1800), (600, 600, 600), 2875),
+    # Одна ступень: при малом бюджете она забирает весь net, и на ожидание
+    # спейсинга не остаётся ничего; при полном — свой потолок и остаток.
+    (5000, "avito", 0): ((4075,), (), 0),
+    (15000, "avito", 0): ((6000,), (), 8075),
+    (30000, "avito", 0): ((6000,), (), 23075),
     # Единственная клетка, где первая ступень зажата бюджетом, а не своим потолком.
     (5000, "ym", 3): ((2425,), (), 0),
 }
@@ -129,21 +134,25 @@ def test_self_financing_guard_is_an_expected_table_not_a_truth() -> None:
     Асимметрия намеренная: у ym гард (600) не превышает пола самой короткой
     ступени пути запроса, поэтому ожидание всегда оплачено недотраченным
     временем предыдущей ступени. У Ozon и WB это не так, и там гард — реальная
-    статья расхода. Любое изменение любого из шести чисел ломает этот тест,
-    что и требуется.
+    статья расхода. У Авито ступень одна и гардов нет вовсе, но интервал
+    спейсинга остаётся статьёй расхода из резидуала. Любое изменение любого из
+    восьми чисел ломает этот тест, что и требуется.
     """
     actual = {
         mp: MIN_INTERVAL_MS[mp]
         <= min(r.floor_ms for r in LADDER[mp] if r.kind in ("replay", "enrich"))
         for mp in MARKETPLACES
     }
-    assert actual == {"ozon": False, "wb": False, "ym": True}
+    assert actual == {"ozon": False, "wb": False, "ym": True, "avito": False}
 
 
 def test_mint_never_reaches_the_request_path() -> None:
     for mp in MARKETPLACES:
-        assert any(r.kind == "mint" for r in LADDER[mp]), "минтинг объявлен"
-        assert not any(r.kind == "mint" for r in request_ladder(mp)), "но не на пути запроса"
+        assert not any(r.kind == "mint" for r in request_ladder(mp)), "минтинг не на пути запроса"
+    # Объявлен там, где сессию снимает браузер. Авито снимает челлендж по
+    # чистому HTTP, и ступени минтинга у него нет вовсе.
+    declared = {mp for mp in MARKETPLACES if any(r.kind == "mint" for r in LADDER[mp])}
+    assert declared == {"ozon", "wb", "ym"}
     assert MINT_HARD_CAP_MS > RESPONSE_BUDGET_MAX_MS
 
 
@@ -151,7 +160,7 @@ def test_render_is_opt_in_and_only_for_ym() -> None:
     assert not any(r.kind == "render" for r in request_ladder("ym"))
     with_render = request_ladder("ym", with_render=True)
     assert [r.kind for r in with_render] == ["replay", "replay", "replay", "render", "enrich"]
-    for mp in ("ozon", "wb"):
+    for mp in ("ozon", "wb", "avito"):
         assert request_ladder(mp, with_render=True) == request_ladder(mp)
 
 

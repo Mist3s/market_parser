@@ -8,16 +8,18 @@
 
 from __future__ import annotations
 
+import math
 import sqlite3
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mktlink.api.routes import Deps, Extraction
-from mktlink.budget import stage_reserve_ms
+from mktlink.budget import plan, stage_reserve_ms
 from mktlink.egress.client import EgressClient
 from mktlink.egress.jars import JarStore
 from mktlink.egress.spacing import reserve as reserve_slot
 from mktlink.egress.spacing import wait as wait_slot
+from mktlink.egress.unblock import Unblocker
 from mktlink.marketplaces.base import Context, run_ladder
 from mktlink.marketplaces.lanes import SimpleLease, build_lane
 from mktlink.marketplaces.selectors import REGISTRY as SELECTORS
@@ -55,6 +57,22 @@ JAR_REQUIRED: frozenset[str] = frozenset({"ozon"})
 #: контролируем. Прямой егресс — это фолбэк, а не замена.
 WORKS_DIRECT: frozenset[str] = frozenset({"wb"})
 
+#: Маркетплейсы, которые ходят ТОЛЬКО с нашего адреса: пул прокси для них не
+#: спрашивается вовсе, даже когда в нём есть адрес.
+#:
+#: Авито — по замеру, а не по удобству. ЗАМЕР 2026-10-01: карточка отвечает с
+#: нашего адреса ``439`` с челленджем QRATOR, и он снимается по чистому HTTP
+#: (:mod:`mktlink.egress.unblock`) — прокси для этого не нужен.
+#:
+#: Но главная причина — схема. ``proxy_health``, ``jar`` и
+#: ``marketplace_policy`` закрыты CHECK'ом ``mp IN ('ozon','wb','ym')``, и
+#: первая же попытка Авито через прокси упала бы на вставке в
+#: ``proxy_health`` — то есть 500 на запросе, который отработал. Пустить Авито
+#: через прокси значит сперва мигрировать эти три таблицы (SQLite не умеет
+#: менять CHECK на месте: только пересоздание таблицы), и это отдельное
+#: решение, а не побочный эффект добавления маркетплейса.
+DIRECT_ONLY: frozenset[str] = frozenset({"avito"})
+
 #: Идентификатор «наш адрес без прокси» для таблицы ``spacing``.
 #: Отрицательный, как и ``API_EGRESS_ID``, и отличный от него: спейсинг
 #: считается по паре, и смешивать два разных егресса в одну пару значило
@@ -91,6 +109,7 @@ def build_ladder(
     *,
     api_client: EgressClient | None = None,
     api_marketplaces: frozenset[str] = frozenset(),
+    unblocker: Unblocker | None = None,
 ):
     """Собрать боевую лестницу.
 
@@ -104,6 +123,9 @@ def build_ladder(
     где каждый запрос стоит кредитов. Один транспорт на всех означал бы либо
     платить за уже работающий WB, либо не получить два маркетплейса из трёх.
     ``api_marketplaces`` пустое — вся система работает как раньше.
+
+    ``unblocker`` — снятие челленджа Авито; ``None`` означает разблокировщик
+    процесса (:data:`mktlink.egress.unblock.DEFAULT`). Параметр нужен тестам.
     """
     jars = JarStore(conn)
     pool = PoolView(conn)
@@ -125,6 +147,11 @@ def build_ladder(
             from mktlink.egress.scrapedo import API_EGRESS_ID  # noqa: PLC0415
 
             lease = SimpleLease(proxy_id=API_EGRESS_ID, proxy_url=None)
+        elif c.marketplace in DIRECT_ONLY:
+            # Пул не спрашиваем вовсе: см. DIRECT_ONLY. jar здесь тоже не
+            # читается — его таблица этот маркетплейс не принимает, а сессию
+            # держит разблокировщик.
+            lease = SimpleLease(proxy_id=DIRECT_EGRESS_ID, proxy_url=None)
         else:
             got = pool.lease()
             if got is None:
@@ -155,16 +182,28 @@ def build_ladder(
         # одинаково с cookie и без, поэтому требовать jar значило бы
         # сообщать клиенту не ту причину.
 
-        slot = reserve_slot(conn, c.marketplace, lease.proxy_id)
+        # Ожидание допускается, только если после него лестница начнётся:
+        # хвост стадии плюс полы всех ступеней с гардами. С одним хвостом
+        # проходило ожидание, после которого не влезала ни одна ступень, и
+        # запрос просыпал бюджет, чтобы отказать уже без вызова.
+        admit_ms = stage_reserve_ms(c.marketplace) + plan(
+            budget_ms, c.marketplace, 0, via_api=via_api
+        ).floor()
+        slot = reserve_slot(
+            conn, c.marketplace, lease.proxy_id, max_wait_ms=dl.slice_ms(math.inf, admit_ms)
+        )
+        refused = Extraction(
+            verdict=Verdict.BUDGET_EXHAUSTED, reason="spacing_wait_exceeds_budget"
+        )
+        if slot.refused:
+            return refused
         try:
-            await wait_slot(dl, slot, reserve_ms=stage_reserve_ms(c.marketplace))
+            await wait_slot(dl, slot, reserve_ms=admit_ms)
         except DeadlineExceeded:
-            return Extraction(
-                verdict=Verdict.BUDGET_EXHAUSTED, reason="spacing_wait_exceeds_budget"
-            )
+            return refused
 
         lane_client = client_for(c.marketplace)
-        lane = build_lane(c.marketplace, lane_client, SELECTORS, lease)
+        lane = build_lane(c.marketplace, lane_client, SELECTORS, lease, unblocker=unblocker)
         ctx = Context(
             marketplace=c.marketplace,
             canonical_url=c.url,

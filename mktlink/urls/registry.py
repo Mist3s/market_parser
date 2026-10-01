@@ -1,4 +1,4 @@
-"""Закрытый литеральный allowlist трёх маркетплейсов.
+"""Закрытый литеральный allowlist четырёх маркетплейсов.
 
 Ни одного wildcard-поддомена, и это не педантизм. Защита от DNS rebinding на
 прямых хопах опирается на то, что резолвимое имя выбираем **мы**, а не
@@ -42,6 +42,10 @@ class HostRule:
     #: Сбросить их значило бы вернуть продавца другого оффера — молчаливая
     #: порча целостности, которую клиент обнаружить не может.
     offer_params: frozenset[str]
+    #: Карточка и есть оффер: у неё ровно один продавец, и он — свойство
+    #: ссылки, а не снимок аукциона. Так устроены объявления Авито. Тогда
+    #: оффер закреплён без всяких параметров, и ответ стабилен по построению.
+    listing_is_offer: bool = False
 
 
 REGISTRY: Final[dict[str, HostRule]] = {
@@ -91,6 +95,28 @@ REGISTRY: Final[dict[str, HostRule]] = {
         # На Я.Маркете одна карточка агрегирует офферы МНОГИХ продавцов,
         # поэтому эти параметры — не шум, а выбор продавца.
         offer_params=frozenset({"sku", "offerid", "do-waremd5"}),
+    ),
+    "avito": HostRule(
+        marketplace="avito",
+        # ЗАМЕР 2026-10-01: ``avito.ru`` и ``m.avito.ru`` отвечают 301 на тот же
+        # путь под ``www``. Принимаем все три, ходим только в ``www``.
+        hosts=frozenset({"www.avito.ru", "avito.ru", "m.avito.ru"}),
+        # [замер] /{город}/{категория}/{слаг}_{номер}. Город и слаг на ответ не
+        # влияют: чужой город и искажённый слаг отдают ту же карточку с 200.
+        # Решает номер, и он же — якорь разбора.
+        pdp=(re.compile(r"^/[^/]+/[^/]+/[^/]+_(?P<item_id>\d{6,12})/?$"),),
+        # Форма /{номер} существует: без cookie разблокировки она отвечает 403,
+        # с ней — 301. Раскрутка челлендж не снимает, поэтому кортеж пустой:
+        # в раскрутку не допускается ничего.
+        shortlink=(),
+        not_pdp=(
+            re.compile(r"^/(brands|user|profile|favorites|items|web|business)(/|$)"),
+            # Город, город с категорией и фильтры глубже — это выдача.
+            re.compile(r"^/[a-z][a-z0-9_-]*(/[^/]+)*/?$"),
+        ),
+        # Параметров выбора оффера нет: оффер — само объявление.
+        offer_params=frozenset(),
+        listing_is_offer=True,
     ),
 }
 
@@ -183,3 +209,7 @@ def unwind_eligible(host: str, path: str) -> bool:
 
 def offer_params(marketplace: str) -> frozenset[str]:
     return REGISTRY[marketplace].offer_params
+
+
+def listing_is_offer(marketplace: str) -> bool:
+    return REGISTRY[marketplace].listing_is_offer

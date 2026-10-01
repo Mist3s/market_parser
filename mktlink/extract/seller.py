@@ -38,7 +38,7 @@ from mktlink.marketplaces.verdict import SellerStatus
 #: Проверка «якорный ли путь» смотрит на СЕГМЕНТ УРОВНЯ, а не на всю строку —
 #: сравнение целой строки с префиксами уровней не совпадало бы никогда, и
 #: продавец был бы null на каждом запросе при зелёных метриках лестницы.
-SOURCE_RE = re.compile(r"^(?P<mp>ozon|wb|ym):(?P<tier>[a-z_]+(?::[a-z_]+)?):(?P<path>.+)$")
+SOURCE_RE = re.compile(r"^(?P<mp>ozon|wb|ym|avito):(?P<tier>[a-z_]+(?::[a-z_]+)?):(?P<path>.+)$")
 
 #: Уровни, которые считаются якорными.
 ANCHORED_TIERS: tuple[str, ...] = ("state", "dom:offer", "legal_block")

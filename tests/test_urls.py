@@ -33,8 +33,8 @@ from mktlink.urls.validate import UrlRejected, validate
 # --- реестр ------------------------------------------------------------------
 
 
-def test_scope_is_exactly_three_marketplaces() -> None:
-    assert set(REGISTRY) == {"ozon", "wb", "ym"}
+def test_scope_is_exactly_four_marketplaces() -> None:
+    assert set(REGISTRY) == {"ozon", "wb", "ym", "avito"}
     assert "detmir" not in ALLOWED_HOSTS and "samokat.ru" not in ALLOWED_HOSTS
 
 

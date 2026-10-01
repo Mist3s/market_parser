@@ -26,8 +26,8 @@ def test_camoufox_is_firefox_so_impersonate_must_be_firefox() -> None:
     assert FIREFOX.sends_sec_ch_ua is False, "Firefox их не шлёт — иначе это тэлл"
 
 
-def test_all_three_marketplaces_share_one_family() -> None:
-    assert set(PROFILES) == {"ozon", "wb", "ym"}
+def test_all_marketplaces_share_one_family() -> None:
+    assert set(PROFILES) == {"ozon", "wb", "ym", "avito"}
     assert len({p.impersonate for p in PROFILES.values()}) == 1
 
 

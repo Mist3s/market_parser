@@ -1,8 +1,8 @@
 """Боевые лейны: экстракторы, подключённые к сети, jar и спейсингу.
 
 Здесь и только здесь встречаются чистый разбор и грязный ввод-вывод. Разбор
-живёт в :mod:`.ozon`, :mod:`.wb`, :mod:`.ym` и тестируется фикстурами; сеть
-живёт в :mod:`mktlink.egress`; лейн их сшивает.
+живёт в :mod:`.ozon`, :mod:`.wb`, :mod:`.ym`, :mod:`.avito` и тестируется
+фикстурами; сеть живёт в :mod:`mktlink.egress`; лейн их сшивает.
 
 Аренда прокси и слот спейсинга берутся ОДИН раз на запрос, а не на ступень:
 все ступени одного запроса идут через один адрес с одним jar, иначе вторая
@@ -16,9 +16,10 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from mktlink.budget import Rung
-from mktlink.egress.client import EgressClient
+from mktlink.egress import unblock
+from mktlink.egress.client import BodyTooLarge, EgressClient
 from mktlink.egress.jars import Jar
-from mktlink.marketplaces import ozon, wb, ym
+from mktlink.marketplaces import avito, ozon, wb, ym
 from mktlink.marketplaces.base import Context, RungResult
 from mktlink.marketplaces.selectors import Selectors
 from mktlink.marketplaces.verdict import Verdict
@@ -41,7 +42,7 @@ class SimpleLease:
 
 
 class Lane:
-    """Общая часть трёх лейнов."""
+    """Общая часть лейнов."""
 
     def __init__(
         self,
@@ -223,10 +224,58 @@ class YmLane(Lane):
         return RungResult(verdict=Verdict.PARTIAL, legal_name=_legal_name(r.body))
 
 
-LANES = {"ozon": OzonLane, "wb": WbLane, "ym": YmLane}
+class AvitoLane(Lane):
+    """Карточка Авито через своё рукопожатие с QRATOR, а не через клиент.
+
+    Клиент лейна здесь не участвует вовсе: значение челленджа приходит только
+    в ``Set-Cookie``, а клиент заголовков не отдаёт (см. докстроку
+    :mod:`mktlink.egress.unblock`). Отпечаток, срезы бюджета и потолок тела —
+    те же, что у остальных лейнов.
+    """
+
+    def __init__(
+        self, client, selectors, lease, *, unblocker: unblock.Unblocker | None = None
+    ) -> None:
+        super().__init__("avito", client, selectors, lease)
+        self._unblocker = unblocker or unblock.DEFAULT
+
+    async def _pdp_html(self, dl, ctx, cap_ms, prev, name):
+        from mktlink.budget import stage_reserve_ms  # noqa: PLC0415
+
+        try:
+            status, body = await self._unblocker.fetch(
+                dl,
+                ctx.canonical_url,
+                egress_id=self._lease.proxy_id,
+                proxy_url=self._lease.proxy_url,
+                cap_ms=cap_ms,
+                reserve_ms=stage_reserve_ms(self.marketplace),
+                max_bytes=2 * 1024 * 1024,
+            )
+        except unblock.PowFailed as exc:
+            # Челлендж пришёл, а снять его не вышло: это блок, а не наша
+            # ошибка разбора. Причина уходит в диагностику ступени.
+            return RungResult(verdict=Verdict.CAPTCHA, raw={"pow": exc.reason})
+        except unblock.UpstreamStatus as exc:
+            return RungResult(verdict=avito.classify_response("", status=exc.status))
+        except (unblock.TransportError, BodyTooLarge):
+            return RungResult(verdict=Verdict.UPSTREAM_ERROR)
+        return avito.parse_pdp(body, anchor_ids=set(ctx.anchor_ids), status=status)
 
 
-def build_lane(mp: str, client: EgressClient, selectors: Selectors, lease: Lease) -> Lane:
+LANES = {"ozon": OzonLane, "wb": WbLane, "ym": YmLane, "avito": AvitoLane}
+
+
+def build_lane(
+    mp: str,
+    client: EgressClient,
+    selectors: Selectors,
+    lease: Lease,
+    *,
+    unblocker: unblock.Unblocker | None = None,
+) -> Lane:
+    if mp == "avito":
+        return AvitoLane(client, selectors, lease, unblocker=unblocker)
     return LANES[mp](client, selectors, lease)
 
 

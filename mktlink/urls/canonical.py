@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from urllib.parse import parse_qsl, urlencode
 
-from mktlink.urls.registry import Match, offer_params
+from mktlink.urls.registry import Match, listing_is_offer, offer_params
 
 #: Синонимы параметров выбора оффера, приводимые к одному имени.
 #:
@@ -77,10 +77,19 @@ class Canonical:
 
     url: str
     marketplace: str
-    #: Идентификаторы из пути: sku / nm / sku_id / product_id / ware_md5.
+    #: Идентификаторы из пути: sku / nm / sku_id / product_id / ware_md5 / item_id.
     ids: dict[str, str]
     #: Сохранённые параметры выбора оффера, отсортированные.
     offer: tuple[tuple[str, str], ...]
+
+    @property
+    def pinned(self) -> bool:
+        """Закреплён ли оффер, то есть продавец — свойство ссылки.
+
+        Два способа: параметр выбора оффера в query (Ozon, Я.Маркет) или
+        карточка, у которой оффер один по устройству маркетплейса (Авито).
+        """
+        return bool(self.offer) or listing_is_offer(self.marketplace)
 
     @property
     def cache_key(self) -> str:
@@ -102,10 +111,11 @@ _IDENT_PREFIX = {
     "sku_id": "s",
     "product_id": "p",
     "ware_md5": "w",
+    "item_id": "i",
     "code": "c",
 }
 #: Порядок разрешения: более специфичный идентификатор выигрывает.
-_IDENT_ORDER = ("ware_md5", "sku", "nm", "sku_id", "product_id", "code")
+_IDENT_ORDER = ("ware_md5", "sku", "nm", "sku_id", "product_id", "item_id", "code")
 
 
 def _primary_ident(ids: dict[str, str]) -> str:
@@ -138,6 +148,8 @@ def canonicalise(host: str, path: str, query: str, m: Match) -> Canonical:
     # Хост нормализуется к www-форме владельца: ozon.ru и www.ozon.ru — одна
     # и та же карточка, и держать два ключа кэша на неё незачем.
     canon_host = _canonical_host(host)
+    if m.marketplace in _STRIP_TRAILING_SLASH:
+        path = path.rstrip("/") or "/"
     tail = "?" + urlencode(offer) if offer else ""
     return Canonical(
         url=f"https://{canon_host}{path}{tail}",
@@ -153,7 +165,16 @@ _CANONICAL_HOST = {
     "wildberries.ru": "www.wildberries.ru",
     "www.wildberries.ru": "www.wildberries.ru",
     "market.yandex.ru": "market.yandex.ru",
+    "avito.ru": "www.avito.ru",
+    "www.avito.ru": "www.avito.ru",
+    "m.avito.ru": "www.avito.ru",
 }
+
+#: Маркетплейсы, где конечный слеш в пути карточки — шум. На Авито ссылка со
+#: слешем и без него — одно объявление, а ходим мы без автоследования.
+#: ЗАМЕР 2026-10-01: адрес со слешем отвечает 301, то есть с ним ступень
+#: вернула бы вердикт вместо карточки.
+_STRIP_TRAILING_SLASH = frozenset({"avito"})
 
 
 def _canonical_host(host: str) -> str:

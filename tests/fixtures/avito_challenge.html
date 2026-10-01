@@ -1,0 +1,235 @@
+<!-- Авито, ответ 439 от QRATOR на первый GET карточки 7822637882 без cookie, снят 2026-10-01. Тело целиком: значение челленджа приходит не в нём, а в Set-Cookie pow_challenge. -->
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Доступ ограничен: проверка безопасности</title>
+    <style>
+        body {
+            margin: 0;
+            background-color: #fff;
+            color: #000;
+            font: 13px/1.5 Arial, 'Helvetica Neue', Helvetica, sans-serif;
+            margin-left: 20px;
+            margin-right: 20px;
+            display: flex;
+        }
+
+        .firewall-container {
+            margin: 30px auto;
+            width: 500px;
+            position: relative;
+        }
+
+        .firewall-icon {
+            position: absolute;
+            left: -87px;
+            top: 0;
+        }
+
+        .firewall-title {
+            font-size: 24px;
+            font-weight: 400;
+            line-height: 28px;
+        }
+
+        .firewall-status {
+            font-size: 14px;
+            margin-top: 16px;
+        }
+
+        .firewall-spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 2px solid #d6d6d6;
+            border-top-color: #000;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            vertical-align: middle;
+            margin-right: 8px;
+        }
+
+        .firewall-error {
+            color: #ff6163;
+            font-size: 13px;
+            margin-top: 8px;
+            display: none;
+        }
+
+        .firewall-container .firewall-p-bold {
+            font-weight: 700;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        @media (max-width: 700px) {
+            .firewall-icon {
+                position: static;
+                padding-left: 40%;
+            }
+        }
+    </style>
+</head>
+
+<body>
+<div class="firewall-container">
+    <div class="firewall-icon">
+        <svg xmlns="http://www.w3.org/2000/svg" width="62" height="62">
+            <g fill="none" fill-rule="evenodd">
+                <circle cx="31" cy="31" r="31" fill="#FF6163" />
+                <g stroke="#FFF" stroke-width="2">
+                    <path d="M19.71 20.417l22.627 22.627M42.188 20.118L19.56 42.746" />
+                </g>
+            </g>
+        </svg>
+    </div>
+    <h2 class="firewall-title">Доступ ограничен: проверка безопасности</h2>
+    <div class="firewall-status" id="pow-status">
+        <span class="firewall-spinner" id="pow-spinner"></span>
+        <span id="pow-status-text">Выполняется проверка, подождите...</span>
+    </div>
+    <div class="firewall-error" id="pow-error"></div>
+    <p class="text firewall-p-bold">Что можно сделать, если проблема повторяется</p>
+    <p class="text">&mdash; Отключить VPN.</p>
+    <p class="text">&mdash; Перезагрузить роутер.</p>
+    <p class="text">&mdash; Запустить проверку антивирусом.</p>
+    <p class="text">Не сработает — <a href="https://support.avito.ru/request/720?eventData[contextId]=117">напишите поддержке</a>. Обязательно укажите свой город, провайдера и&nbsp;IP.</p>
+</div>
+
+<script>
+    function getCookie(name) {
+        var match = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
+        return match ? decodeURIComponent(match[1]) : null;
+    }
+
+    function b64DecodeUnicode(str) {
+        str = str.replace(/-/g, '+').replace(/_/g, '/');
+        while (str.length % 4) str += '=';
+        return decodeURIComponent(atob(str).split('').map(function(c) {
+            return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
+        }).join(''));
+    }
+
+    function parseJwtPayload(jwt) {
+        var parts = jwt.split('.');
+        if (parts.length < 2) throw new Error('invalid jwt');
+        return JSON.parse(b64DecodeUnicode(parts[1]));
+    }
+
+    async function sha256hex(str) {
+        var buf = new TextEncoder().encode(str);
+        var hash = await crypto.subtle.digest('SHA-256', buf);
+        var arr = new Uint8Array(hash);
+        var hex = '';
+        for (var i = 0; i < arr.length; i++) {
+            hex += ('0' + arr[i].toString(16)).slice(-2);
+        }
+        return hex;
+    }
+
+    async function solvePow(id, complexity) {
+        var prefix = '';
+        for (var i = 0; i < complexity; i++) prefix += '0';
+        var nonce = 0;
+        while (true) {
+            var hex = await sha256hex(id + ':' + nonce);
+            if (hex.substring(0, complexity) === prefix) {
+                return nonce;
+            }
+            nonce++;
+            if (nonce % 10000 === 0) {
+                await new Promise(function(r) { setTimeout(r, 0); });
+            }
+        }
+    }
+
+    var MAX_RETRIES = 3;
+
+    function showFinalError(msg) {
+        document.getElementById('pow-spinner').style.display = 'none';
+        document.getElementById('pow-status-text').textContent = msg;
+    }
+
+    function showStatus(msg) {
+        document.getElementById('pow-spinner').style.display = 'inline-block';
+        document.getElementById('pow-status-text').textContent = msg;
+        document.getElementById('pow-error').style.display = 'none';
+    }
+
+    async function startPow(attempt) {
+        attempt = attempt || 1;
+        try {
+            showStatus('Получение задания...');
+
+            var challenge = getCookie('pow_challenge');
+            if (!challenge) {
+                showFinalError('Не удалось получить данные для проверки. Обновите страницу.');
+                return;
+            }
+
+            var getResp = await fetch('/web/3/firewallPow/get', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ challenge: challenge }),
+                signal: AbortSignal.timeout(5000),
+            });
+            var getData = await getResp.json();
+
+            if (!getData || !getData.success || !getData.success.result || !getData.success.result.challenge_jwt) {
+                throw new Error('no challenge_jwt');
+            }
+
+            var challengeJwt = getData.success.result.challenge_jwt;
+            var payload = parseJwtPayload(challengeJwt);
+            var id = payload.id;
+            var complexity = payload.compl;
+
+            showStatus('Выполняется проверка, подождите...');
+
+            var nonce = await solvePow(id, complexity);
+
+            showStatus('Отправка результата...');
+
+            var verifyResp = await fetch('/web/3/firewallPow/verify', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ challenge: challengeJwt, nonce: nonce }),
+                signal: AbortSignal.timeout(5000),
+            });
+            var verifyData = await verifyResp.json();
+
+            if (verifyData && verifyData.success && verifyData.success.result && verifyData.success.result.verified) {
+                document.cookie = 'pow_solved=1; Path=/; Max-Age=10; SameSite=Lax';
+                showStatus('Проверка пройдена, перенаправление...');
+                setTimeout(function() { window.location = location.href; }, 300);
+                return;
+            } else {
+                throw new Error('not verified');
+            }
+        } catch (err) {
+            console.error(err);
+            if (attempt < MAX_RETRIES) {
+                setTimeout(function() { startPow(attempt + 1); }, 1000);
+            } else {
+                showFinalError('Не удалось пройти проверку. Обновите страницу.');
+            }
+        }
+    }
+
+    document.addEventListener('DOMContentLoaded', function() {
+        if (getCookie('pow_solved')) {
+            showStatus('Проверка пройдена, перенаправление...');
+            setTimeout(function() { window.location = location.href; }, 3000);
+            return;
+        }
+        startPow(1);
+    });
+</script>
+</body>
+</html>
+

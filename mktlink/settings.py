@@ -166,6 +166,21 @@ class Settings(BaseSettings):
             raise ValueError(f"scrapedo_shorten_via must be 'none' or one of {PROVIDERS}")
         return v
 
+    @field_validator("scrapedo_marketplaces")
+    @classmethod
+    def _has_api_ladder(cls, v: tuple[str, ...]) -> tuple[str, ...]:
+        # Маркетплейс без лестницы API падал бы KeyError на каждом запросе, то
+        # есть 500 вместо ответа. Авито сюда не годится и по устройству: его
+        # лейн снимает челлендж сам и клиента API не использует вовсе.
+        from mktlink.budget import API_LADDER
+
+        unknown = sorted(set(v) - set(API_LADDER))
+        if unknown:
+            raise ValueError(
+                f"scrapedo_marketplaces: no API ladder for {unknown}; allowed {sorted(API_LADDER)}"
+            )
+        return v
+
     @property
     def proxy6_configured(self) -> bool:
         return bool(self.proxy6_api_key)

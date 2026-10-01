@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mktlink"
 version = "0.1.0"
-description = "Название и продавец по ссылке на товар: Ozon, Wildberries, Яндекс.Маркет."
+description = "Название и продавец по ссылке на товар: Ozon, Wildberries, Яндекс.Маркет, Авито."
 readme = "README.md"
 requires-python = ">=3.12"
 

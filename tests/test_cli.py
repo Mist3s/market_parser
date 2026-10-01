@@ -7,14 +7,17 @@ import json
 import pytest
 
 from mktlink.cli import main
+from mktlink.constants import MARKETPLACES
 from mktlink.store.db import connect, init_db, is_never_renew
 
 
 def test_budget_reproduces_the_ledger_identity(capsys) -> None:
     assert main(["budget"]) == 0
     out = capsys.readouterr().out
-    assert "РАСХОЖДЕНИЕ" not in out, "тождество обязано сходиться для всех трёх"
-    assert out.count("[ok]") == 3
+    assert "РАСХОЖДЕНИЕ" not in out, "тождество обязано сходиться для всех"
+    # Число — от списка маркетплейсов, а не литерал: вписанная тройка ломалась
+    # на каждом новом маркетплейсе, ничего не поймав.
+    assert out.count("[ok]") == len(MARKETPLACES)
 
 
 def test_budget_shows_what_did_not_fit(capsys) -> None:

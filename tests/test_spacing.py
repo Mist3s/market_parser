@@ -1,13 +1,17 @@
-"""Гард спейсинга: ключ-пара, самофинансирование, переживание рестарта."""
+"""Гард спейсинга: ключ-пара, самофинансирование, переживание рестарта, часы."""
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
-from mktlink.budget import LADDER, plan
-from mktlink.constants import MIN_INTERVAL_MS
-from mktlink.egress.spacing import peek, reserve
+from mktlink.budget import LADDER, plan, stage_reserve_ms
+from mktlink.constants import MIN_INTERVAL_MS, RESPONSE_BUDGET_MAX_MS
+from mktlink.egress.spacing import Reservation, peek, reserve
 from mktlink.egress.spacing import wait as spacing_wait
+from mktlink.marketplaces.base import Context, RungResult, run_ladder
+from mktlink.marketplaces.verdict import SellerStatus, Verdict
 from mktlink.store.db import connect, init_db
 from mktlink.timing.deadline import Deadline, DeadlineExceeded
 
@@ -103,14 +107,92 @@ def test_reservation_happens_before_the_wait_not_after(conn) -> None:
     assert a.wait_ms == 0 and b.wait_ms == 5000, "второй встал в очередь, а не выстрелил"
 
 
+def test_refusal_does_not_take_the_slot(conn) -> None:
+    """Регрессия: запрос, который не пойдёт, отодвигал следующий.
+
+    Каждый отказ занимал слот ещё на интервал, и серия отказов копила долг:
+    чем больше отказов, тем дольше ждал первый запрос, который мог бы пройти.
+    """
+    reserve(conn, "ozon", 1, now_ms=1_000_000)
+    for _ in range(3):
+        r = reserve(conn, "ozon", 1, now_ms=1_000_000, max_wait_ms=4999)
+        assert r.refused and r.wait_ms == 5000
+    assert peek(conn, "ozon", 1, now_ms=1_000_000) == 5000, "отказы долга не копят"
+
+
+def test_wait_up_to_the_limit_is_admitted_and_booked(conn) -> None:
+    reserve(conn, "ozon", 1, now_ms=1_000_000)
+    r = reserve(conn, "ozon", 1, now_ms=1_000_000, max_wait_ms=5000)
+    assert not r.refused and r.wait_ms == 5000
+    assert peek(conn, "ozon", 1, now_ms=1_000_000) == 10_000
+
+
+def test_the_slot_is_kept_on_the_wall_clock(conn) -> None:
+    """Регрессия: монотонные часы отсчитываются от загрузки машины.
+
+    Момент, записанный до перезагрузки хоста, оказывался впереди на весь
+    прежний аптайм, и пара получала отказ на каждый запрос, пока новый аптайм
+    не догонит старый.
+    """
+    before = time.time_ns() // 1_000_000
+    reserve(conn, "ym", 1)
+    after = time.time_ns() // 1_000_000
+    row = conn.execute(
+        "SELECT next_allowed_ms FROM spacing WHERE mp = 'ym' AND proxy_id = 1"
+    ).fetchone()
+    interval = MIN_INTERVAL_MS["ym"]
+    assert before + interval <= row["next_allowed_ms"] <= after + interval
+
+
+def test_slot_written_by_the_old_clock_does_not_block(conn) -> None:
+    """Строки прежней редакции — монотонные мс, то есть далёкое прошлое."""
+    conn.execute(
+        "INSERT INTO spacing (mp, proxy_id, next_allowed_ms) VALUES ('ozon', 1, ?)",
+        (int(time.monotonic() * 1000) + 5000,),
+    )
+    assert reserve(conn, "ozon", 1).wait_ms == 0
+
+
+def test_debt_no_admitted_request_could_leave_is_dropped(conn) -> None:
+    """Часы прыгнули назад — или строку писали другие часы."""
+    ceiling = RESPONSE_BUDGET_MAX_MS + MIN_INTERVAL_MS["ozon"]
+    conn.execute(
+        "INSERT INTO spacing (mp, proxy_id, next_allowed_ms) VALUES ('ozon', 1, ?)",
+        (1_000_000 + ceiling + 1,),
+    )
+    assert peek(conn, "ozon", 1, now_ms=1_000_000) == 0
+    assert reserve(conn, "ozon", 1, now_ms=1_000_000).wait_ms == 0
+    assert peek(conn, "ozon", 1, now_ms=1_000_000) == MIN_INTERVAL_MS["ozon"]
+
+
+def test_debt_up_to_the_ceiling_is_honoured(conn) -> None:
+    ceiling = RESPONSE_BUDGET_MAX_MS + MIN_INTERVAL_MS["ozon"]
+    conn.execute(
+        "INSERT INTO spacing (mp, proxy_id, next_allowed_ms) VALUES ('ozon', 1, ?)",
+        (1_000_000 + ceiling,),
+    )
+    assert peek(conn, "ozon", 1, now_ms=1_000_000) == ceiling
+    assert reserve(conn, "ozon", 1, now_ms=1_000_000).wait_ms == ceiling
+
+
 async def test_wait_is_a_budget_stage_and_can_refuse(conn) -> None:
     """Ожидание — такая же статья бюджета, как сетевой вызов."""
     reserve(conn, "ozon", 1, now_ms=1_000_000)
     r = reserve(conn, "ozon", 1, now_ms=1_000_000)
 
     dl = Deadline.start(1000, "t")
+    started = time.monotonic()
     with pytest.raises(DeadlineExceeded):
         await spacing_wait(dl, r, reserve_ms=300)
+    assert time.monotonic() - started < 0.2, "отказ сразу, а не после сна до края бюджета"
+
+
+async def test_wait_that_fits_is_served_not_refused() -> None:
+    """Регрессия: таймер стадии, равный сну, срабатывал раньше него."""
+    for _ in range(5):
+        dl = Deadline.start(5000, "t")
+        await spacing_wait(dl, Reservation("avito", -2, 60), reserve_ms=440)
+        assert dl.ledger()["spacing"] >= 60
 
 
 async def test_wait_is_a_noop_when_the_slot_is_free(conn) -> None:
@@ -118,6 +200,39 @@ async def test_wait_is_a_noop_when_the_slot_is_free(conn) -> None:
     r = reserve(conn, "ym", 1, now_ms=1_000_000)
     await spacing_wait(dl, r, reserve_ms=300)
     assert dl.ledger() == {}
+
+
+class _Recorder:
+    """Лестница, которая только отмечает, что её ступень запустили."""
+
+    def __init__(self, mp: str) -> None:
+        self.marketplace = mp
+        self.ran: list[str] = []
+
+    def rung_fn(self, rung):
+        async def fn(dl, ctx, cap_ms, prev):
+            self.ran.append(rung.name)
+            return RungResult(
+                verdict=Verdict.OK, name="ч", seller_name="п", seller_status=SellerStatus.RESOLVED
+            )
+
+        return fn
+
+
+@pytest.mark.parametrize(("mp", "budget"), [("ozon", 15000), ("ym", 15000), ("avito", 5000)])
+async def test_admission_floor_is_exactly_where_the_ladder_starts(mp: str, budget: int) -> None:
+    """Допуск ожидания в проводке резервирует ``stage_reserve_ms + plan.floor()``.
+
+    Это обязано совпадать с порогом, при котором лестница начинает первую
+    ступень: меньше — ожидание, после которого не влезает ни одна ступень,
+    больше — отказ запросу, который успел бы.
+    """
+    need = stage_reserve_ms(mp) + plan(budget, mp, 0).floor()
+    for slack_ms, starts in ((50, True), (-50, False)):
+        dl = Deadline(time.monotonic() + (need + slack_ms) / 1000, "t", budget)
+        lane = _Recorder(mp)
+        await run_ladder(dl, lane, Context(mp, "https://example.test/", {}), budget, hops=0)
+        assert bool(lane.ran) is starts, (slack_ms, need)
 
 
 def test_self_financing_holds_only_for_ym_and_that_is_the_point() -> None:

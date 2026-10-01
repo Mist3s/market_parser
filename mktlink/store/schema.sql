@@ -196,7 +196,7 @@ CREATE TABLE IF NOT EXISTS jar (
 CREATE TABLE IF NOT EXISTS spacing (
   mp                TEXT    NOT NULL,
   proxy_id          INTEGER NOT NULL,
-  next_allowed_ms   INTEGER NOT NULL,
+  next_allowed_ms   INTEGER NOT NULL,   -- настенные мс Unix: см. egress/spacing.py
   PRIMARY KEY (mp, proxy_id)
 ) STRICT;
 

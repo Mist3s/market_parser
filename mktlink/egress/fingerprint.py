@@ -84,7 +84,8 @@ MAX_MAJOR_GAP: Final[int] = 8
 #: а не назначать её вручную при каждом обновлении браузера.
 AVAILABLE_FIREFOX_TARGETS: Final[tuple[int, ...]] = (133, 135, 144, 147)
 
-#: Один профиль на все три маркетплейса: минтит везде Camoufox.
+#: Один профиль на все маркетплейсы: минтит везде Camoufox, а Авито с тем же
+#: отпечатком снимает челлендж без браузера (:mod:`mktlink.egress.unblock`).
 #: ``impersonate`` — самая новая доступная цель, а не «та же, что у браузера»:
 #: одинаковой не бывает (см. докстроку модуля).
 FIREFOX = FingerprintProfile(
@@ -96,7 +97,12 @@ FIREFOX = FingerprintProfile(
     sends_sec_ch_ua=False,
 )
 
-PROFILES: dict[str, FingerprintProfile] = {"ozon": FIREFOX, "wb": FIREFOX, "ym": FIREFOX}
+PROFILES: dict[str, FingerprintProfile] = {
+    "ozon": FIREFOX,
+    "wb": FIREFOX,
+    "ym": FIREFOX,
+    "avito": FIREFOX,
+}
 
 
 def firefox_major(user_agent: str) -> int | None:

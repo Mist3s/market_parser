@@ -90,7 +90,7 @@ class EgressClient:
         леджера, после такого врут.
         """
         profile = PROFILES[marketplace]
-        headers = replay_headers(profile, jar.user_agent if jar else _fallback_ua(profile))
+        headers = replay_headers(profile, jar.user_agent if jar else fallback_ua(profile))
         if jar is not None:
             headers["Cookie"] = jar.cookie_header
         egress = self.egress_kind(proxy_url)
@@ -144,7 +144,7 @@ class EgressClient:
             return r.status_code, r.text
 
 
-def _fallback_ua(profile: Any) -> str:
+def fallback_ua(profile: Any) -> str:
     """UA, когда jar'а нет вовсе — например, на прямой раскрутке.
 
     Форма минимальна намеренно: выдавать себя за конкретную сборку, cookie

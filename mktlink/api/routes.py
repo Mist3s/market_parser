@@ -5,7 +5,7 @@
 егрессом, потом аренда jar и спейсинг, и только потом лестница извлечения.
 
 Дешёвые отказы стоят миллисекунды и не тратят ни прокси, ни бюджет. Запрос
-на маркетплейс вне скоупа отвечает 422 за единицы миллисекунд — при трёх
+на маркетплейс вне скоупа отвечает 422 за единицы миллисекунд — при четырёх
 поддерживаемых маркетплейсах это самый частый отказ, а не экзотика.
 """
 
@@ -316,7 +316,7 @@ async def _run(
     # Срок свежести зависит от того, закреплён ли оффер в ссылке: на
     # закреплённом продавец — свойство ссылки, на модельном — снимок
     # аукциона. Разницу знает только этот уровень, поэтому он её и передаёт.
-    fresh_ttl = deps.product_ttl_pinned_s if c.offer else deps.product_ttl_s
+    fresh_ttl = deps.product_ttl_pinned_s if c.pinned else deps.product_ttl_s
     # force_refresh обходит кэш ЦЕЛИКОМ, включая память процесса. Без этого
     # суточный срок свежести был бы односторонним: клиент мог разрешить старое,
     # но не мог потребовать свежего.
@@ -502,7 +502,10 @@ def _pending(
 
 def _product_block(c: Canonical, name: str | None = None) -> ProductBlock:
     ids = c.ids
-    kind = next((k for k in ("sku", "nm", "sku_id", "product_id", "ware_md5") if k in ids), None)
+    kind = next(
+        (k for k in ("sku", "nm", "sku_id", "product_id", "ware_md5", "item_id") if k in ids),
+        None,
+    )
     return ProductBlock(
         id=ids.get(kind) if kind else None,
         id_kind=kind,
@@ -519,6 +522,11 @@ def _offer_block(c: Canonical) -> OfferBlock:
             selection="explicit",
             stable=True,
         )
+    if c.pinned:
+        # Объявление Авито: оффер один и назван самой ссылкой. Параметра,
+        # который стоило бы эхом вернуть для закрепления, нет — закреплять
+        # нечего, ответ и так стабилен.
+        return OfferBlock(ref=None, selection="explicit", stable=True)
     return OfferBlock(ref=None, selection="marketplace_default", stable=False)
 
 
